@@ -4,39 +4,71 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 /**
- * AirROI APIの正しいエンドポイントパスを特定するための診断ルート。
+ * AirROI APIレスポンスの実データ検証用の診断ルート。
  * CRON_SECRET をクエリ `key` に指定した場合のみ実行可能。
- * 各候補パスへ1リクエストずつ送り、ステータスとレスポンス冒頭を返す。
+ * `id` で指定した物件の料金カレンダーを通貨指定パターン別に取得し、統計を返す。
  */
-const CANDIDATES: { method: "GET" | "POST"; path: string; body?: unknown }[] = [
-  {
-    method: "POST",
-    path: `/listings/search/radius`,
-    body: { latitude: 35.4167, longitude: 138.8667, radius: 3 },
-  },
-  {
-    method: "POST",
-    path: `/listings/search/radius`,
-    body: { latitude: 35.4167, longitude: 138.8667, radius: 3, page_size: 100, offset: 0 },
-  },
-  {
-    method: "POST",
-    path: `/listings/search/radius`,
-    body: {
-      latitude: 35.4167,
-      longitude: 138.8667,
-      radius: 3,
-      pagination: { page_size: 100, offset: 0 },
-    },
-  },
-  { method: "GET", path: `/listings/future/rates?id=3607285&currency=native` },
-  { method: "GET", path: `/listings?id=3607285&currency=native` },
-];
-
 function cleanEnv(value: string | undefined): string | undefined {
   if (!value) return undefined;
   const cleaned = value.trim().replace(/^["']|["']$/g, "").trim();
   return cleaned.length > 0 ? cleaned : undefined;
+}
+
+function parseJsonSafe<T>(text: string): T {
+  const quoted = text.replace(/([:[,]\s*)(\d{16,})(?=\s*[,}\]])/g, '$1"$2"');
+  return JSON.parse(quoted) as T;
+}
+
+interface RateDay {
+  date?: string;
+  available?: unknown;
+  rate?: unknown;
+  min_nights?: unknown;
+  [key: string]: unknown;
+}
+
+function summarize(days: RateDay[]) {
+  const rates = days
+    .map((d) => Number(d.rate))
+    .filter((n) => Number.isFinite(n) && n > 0)
+    .sort((a, b) => a - b);
+  const availTrue = days.filter((d) => d.available === true || d.available === 1).length;
+  const availFalse = days.filter((d) => d.available === false || d.available === 0).length;
+  const availOther = days.length - availTrue - availFalse;
+  const pct = (p: number) => rates[Math.min(rates.length - 1, Math.floor((p / 100) * rates.length))];
+  return {
+    totalDays: days.length,
+    availTrue,
+    availFalse,
+    availOther,
+    positiveRateDays: rates.length,
+    zeroOrMissingRateDays: days.length - rates.length,
+    rateMin: rates[0] ?? null,
+    rateP25: rates.length ? pct(25) : null,
+    rateMedian: rates.length ? pct(50) : null,
+    rateP75: rates.length ? pct(75) : null,
+    rateMax: rates[rates.length - 1] ?? null,
+    rateAvg: rates.length ? Math.round(rates.reduce((a, b) => a + b, 0) / rates.length) : null,
+    availableDaysRateAvg: (() => {
+      const r = days
+        .filter((d) => d.available === true || d.available === 1)
+        .map((d) => Number(d.rate))
+        .filter((n) => Number.isFinite(n) && n > 0);
+      return r.length ? Math.round(r.reduce((a, b) => a + b, 0) / r.length) : null;
+    })(),
+    unavailableDaysRateAvg: (() => {
+      const r = days
+        .filter((d) => d.available === false || d.available === 0)
+        .map((d) => Number(d.rate))
+        .filter((n) => Number.isFinite(n) && n > 0);
+      return r.length ? Math.round(r.reduce((a, b) => a + b, 0) / r.length) : null;
+    })(),
+    first5: days.slice(0, 5),
+    highest3: [...days]
+      .filter((d) => Number.isFinite(Number(d.rate)))
+      .sort((a, b) => Number(b.rate) - Number(a.rate))
+      .slice(0, 3),
+  };
 }
 
 export async function GET(request: NextRequest) {
@@ -50,31 +82,42 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "AIRROI_API_KEY 未設定" }, { status: 500 });
   }
 
+  const id = request.nextUrl.searchParams.get("id") ?? "560510509533844467";
   const base = (process.env.AIRROI_API_BASE_URL ?? "https://api.airroi.com").replace(/\/$/, "");
-  const results: { method: string; path: string; status: number; body: string }[] = [];
 
-  for (const c of CANDIDATES) {
+  const variants = [
+    `/listings/future/rates?id=${id}&currency=native`,
+    `/listings/future/rates?id=${id}`,
+    `/listings/future/rates?id=${id}&currency=JPY`,
+  ];
+
+  const results: Record<string, unknown>[] = [];
+  for (const path of variants) {
     try {
-      const res = await fetch(`${base}${c.path}`, {
-        method: c.method,
-        headers: {
-          "x-api-key": apiKey,
-          Accept: "application/json",
-          ...(c.body ? { "Content-Type": "application/json" } : {}),
-        },
-        body: c.body ? JSON.stringify(c.body) : undefined,
+      const res = await fetch(`${base}${path}`, {
+        headers: { "x-api-key": apiKey, Accept: "application/json" },
       });
-      const body = (await res.text().catch(() => "")).slice(0, 2500);
-      results.push({ method: c.method, path: c.path, status: res.status, body });
-    } catch (err) {
+      const text = await res.text().catch(() => "");
+      if (!res.ok) {
+        results.push({ path, status: res.status, body: text.slice(0, 500) });
+        continue;
+      }
+      const json = parseJsonSafe<{ rates?: RateDay[]; [key: string]: unknown }>(text);
       results.push({
-        method: c.method,
-        path: c.path,
-        status: 0,
-        body: err instanceof Error ? err.message : String(err),
+        path,
+        status: res.status,
+        topLevelKeys: Object.keys(json),
+        summary: json.rates ? summarize(json.rates) : null,
+        nonRatesFields: Object.fromEntries(
+          Object.entries(json)
+            .filter(([k]) => k !== "rates")
+            .map(([k, v]) => [k, JSON.stringify(v).slice(0, 300)]),
+        ),
       });
+    } catch (err) {
+      results.push({ path, status: 0, error: err instanceof Error ? err.message : String(err) });
     }
   }
 
-  return NextResponse.json({ base, results });
+  return NextResponse.json({ base, id, results });
 }

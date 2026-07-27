@@ -120,4 +120,18 @@ export async function ensureSchema(db: Client): Promise<void> {
   } catch {
     // 列が既に存在する場合は何もしない
   }
+  // 一度きり: 全物件の同期時刻が同一だと更新周期後に一斉失効するため、
+  // 時刻をランダムに過去へ散らして日々の更新件数 (=APIコスト) を平準化する
+  const staggered = await db.execute(
+    "SELECT value FROM sync_state WHERE key = 'migration:stagger-rates'",
+  );
+  if (staggered.rows.length === 0) {
+    await db.execute(
+      `UPDATE properties SET rates_synced_at = datetime('now', '-' || (ABS(RANDOM()) % 14) || ' days')
+       WHERE rates_synced_at IS NOT NULL`,
+    );
+    await db.execute(
+      "INSERT INTO sync_state (key, value) VALUES ('migration:stagger-rates', datetime('now'))",
+    );
+  }
 }

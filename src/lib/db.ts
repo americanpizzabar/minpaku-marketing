@@ -2,16 +2,35 @@ import { createClient, type Client } from "@libsql/client";
 
 let client: Client | null = null;
 
+/** 環境変数の貼り付けミス (引用符・空白・改行) を吸収する */
+function cleanEnv(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const cleaned = value.trim().replace(/^["']|["']$/g, "").trim();
+  return cleaned.length > 0 ? cleaned : undefined;
+}
+
+function dbUrl(): string | undefined {
+  const url = cleanEnv(process.env.TURSO_DATABASE_URL);
+  if (!url) return undefined;
+  // https://でも libsqlクライアントは処理できるが、ダッシュボードURLは弾く
+  if (url.startsWith("https://app.turso.tech") || url.startsWith("https://api.turso.tech")) {
+    console.error("TURSO_DATABASE_URL にダッシュボード/APIのURLが設定されています。libsql://で始まるDatabase URLを設定してください。");
+    return undefined;
+  }
+  return url;
+}
+
 export function isDbConfigured(): boolean {
-  return Boolean(process.env.TURSO_DATABASE_URL);
+  return Boolean(dbUrl());
 }
 
 export function getDb(): Client | null {
-  if (!isDbConfigured()) return null;
+  const url = dbUrl();
+  if (!url) return null;
   if (!client) {
     client = createClient({
-      url: process.env.TURSO_DATABASE_URL!,
-      authToken: process.env.TURSO_AUTH_TOKEN,
+      url,
+      authToken: cleanEnv(process.env.TURSO_AUTH_TOKEN),
     });
   }
   return client;

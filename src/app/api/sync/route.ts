@@ -16,7 +16,12 @@ export async function POST() {
     });
   }
 
-  await ensureSchema(db);
-  const result = await syncAllAreas(db, "manual_refresh");
-  return NextResponse.json(result, { status: result.status === "SUCCESS" ? 200 : 500 });
+  try {
+    await ensureSchema(db);
+    const result = await syncAllAreas(db, "manual_refresh");
+    return NextResponse.json(result, { status: result.status === "SUCCESS" ? 200 : 500 });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ status: "FAILED", error: message }, { status: 500 });
+  }
 }

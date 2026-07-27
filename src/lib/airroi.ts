@@ -1,19 +1,18 @@
-import type { Client } from "@libsql/client";
+import type { Client, InStatement } from "@libsql/client";
 import type { PropertyType } from "./types";
 
 /**
- * AirROI API クライアント
+ * AirROI API クライアント (実機検証済みの仕様)
  * - ベースURL: https://api.airroi.com
  * - 認証: x-api-key ヘッダ
- * - エリア検索: GET /listings/search/radius (GPS中心 + マイル半径)
- * - 日別料金/空室: GET /listings/future/rates (今後365日)
- *
- * レスポンスのフィールド名はバージョンにより揺れがあるため、
- * 複数の候補キーを許容する防御的パースを行う。
+ * - エリア検索: POST /listings/search/radius
+ *     body: { latitude, longitude, radius, pagination: { pageSize(最大10), offset } }
+ *     res:  { pagination: { total_count, page_size, offset }, results: [{ listing_info: {...} }] }
+ * - 日別料金/空室: GET /listings/future/rates?id=<listing_id>&currency=native
+ *     res:  { rates: [{ date, available, rate, min_nights }] }
  */
 const BASE_URL = (process.env.AIRROI_API_BASE_URL ?? "https://api.airroi.com").replace(/\/$/, "");
 
-// 各エリアの検索中心座標と半径 (マイル)
 const AREA_SEARCH: Record<string, { lat: number; lng: number }> = {
   山中湖村: { lat: 35.4167, lng: 138.8667 },
   富士吉田市: { lat: 35.4874, lng: 138.8077 },
@@ -24,7 +23,8 @@ const AREA_SEARCH: Record<string, { lat: number; lng: number }> = {
 
 const RADIUS_MILES = Number(process.env.AIRROI_RADIUS_MILES ?? 3);
 // Pay-per-call コスト管理: 1エリアあたりのカレンダー取得件数上限
-const MAX_LISTINGS_PER_AREA = Number(process.env.AIRROI_MAX_LISTINGS_PER_AREA ?? 40);
+const MAX_LISTINGS_PER_AREA = Number(process.env.AIRROI_MAX_LISTINGS_PER_AREA ?? 25);
+const PAGE_SIZE = 10; // APIの上限
 
 export interface SyncResult {
   recordsFetched: number;
@@ -37,39 +37,51 @@ function cleanEnv(value: string | undefined): string | undefined {
   return cleaned.length > 0 ? cleaned : undefined;
 }
 
-async function airRoiFetch<T>(path: string): Promise<T> {
+function apiKeyOrThrow(): string {
   const apiKey = cleanEnv(process.env.AIRROI_API_KEY);
   if (!apiKey) throw new Error("AIRROI_API_KEY が設定されていません");
+  return apiKey;
+}
+
+async function airRoiGet<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
-    headers: {
-      "x-api-key": apiKey,
-      Accept: "application/json",
-    },
+    headers: { "x-api-key": apiKeyOrThrow(), Accept: "application/json" },
   });
   if (!res.ok) {
     const body = (await res.text().catch(() => "")).slice(0, 300);
-    throw new Error(`AirROI API Error: ${res.status} ${res.statusText} (${path}) ${body}`);
+    throw new Error(`AirROI API Error: ${res.status} ${res.statusText} (GET ${path}) ${body}`);
   }
   return res.json() as Promise<T>;
 }
 
-// ---- 防御的パースヘルパ ----
+async function airRoiPost<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${BASE_URL}${path}`, {
+    method: "POST",
+    headers: {
+      "x-api-key": apiKeyOrThrow(),
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const errBody = (await res.text().catch(() => "")).slice(0, 300);
+    throw new Error(`AirROI API Error: ${res.status} ${res.statusText} (POST ${path}) ${errBody}`);
+  }
+  return res.json() as Promise<T>;
+}
 
 type Json = Record<string, unknown>;
 
-function firstArray(obj: unknown, keys: string[]): Json[] {
-  if (Array.isArray(obj)) return obj as Json[];
-  if (typeof obj !== "object" || obj === null) return [];
-  const rec = obj as Json;
-  for (const k of keys) {
-    const v = rec[k];
-    if (Array.isArray(v)) return v as Json[];
-    if (typeof v === "object" && v !== null) {
-      const nested = firstArray(v, keys);
-      if (nested.length > 0) return nested;
+/** result要素の listing_info 等のネストを1階層フラット化して属性を拾いやすくする */
+function flatten(item: Json): Json {
+  const out: Json = { ...item };
+  for (const v of Object.values(item)) {
+    if (typeof v === "object" && v !== null && !Array.isArray(v)) {
+      Object.assign(out, v as Json);
     }
   }
-  return [];
+  return out;
 }
 
 function pick(obj: Json, keys: string[]): unknown {
@@ -87,15 +99,23 @@ function num(v: unknown): number | null {
 
 function mapPropertyType(raw: unknown): PropertyType {
   const s = String(raw ?? "").toLowerCase();
-  if (s.includes("villa")) return "villa";
-  if (s.includes("hotel") || s.includes("ryokan")) return "hotel";
-  if (s.includes("pension") || s.includes("bed and breakfast") || s.includes("b&b")) return "pension";
+  if (s.includes("villa") || s.includes("cabin") || s.includes("chalet") || s.includes("cottage"))
+    return "villa";
+  if (s.includes("hotel") || s.includes("ryokan") || s.includes("aparthotel")) return "hotel";
+  if (s.includes("bed and breakfast") || s.includes("b&b") || s.includes("guesthouse"))
+    return "pension";
   return "house";
 }
 
-/**
- * 指定エリアの物件一覧 + 日別料金/空室を取得し、Turso DBへUPSERTする。
- */
+interface RadiusSearchResponse {
+  pagination?: { total_count?: number; page_size?: number; offset?: number };
+  results?: Json[];
+}
+
+interface FutureRatesResponse {
+  rates?: { date?: string; available?: boolean; rate?: number; min_nights?: number }[];
+}
+
 export async function fetchAndStoreAirRoiData(db: Client, area: string): Promise<SyncResult> {
   let apiCalls = 0;
   let recordsFetched = 0;
@@ -103,26 +123,32 @@ export async function fetchAndStoreAirRoiData(db: Client, area: string): Promise
   const center = AREA_SEARCH[area];
   if (!center) return { recordsFetched, apiCalls };
 
-  // 1. 半径検索でエリア内の物件一覧を取得
-  const searchRes = await airRoiFetch<unknown>(
-    `/listings/search/radius?lat=${center.lat}&lng=${center.lng}&radius=${RADIUS_MILES}`,
-  );
-  apiCalls += 1;
-
-  const listings = firstArray(searchRes, ["listings", "data", "results", "items"]);
-  if (listings.length === 0) {
-    console.warn(
-      `AirROI: ${area} の検索結果が0件、またはレスポンス形式が想定外です。keys=`,
-      typeof searchRes === "object" && searchRes !== null ? Object.keys(searchRes as Json) : typeof searchRes,
-    );
+  // 1. 半径検索 (pageSize上限10のためページングで収集)
+  const collected: Json[] = [];
+  let offset = 0;
+  let totalCount = Infinity;
+  while (collected.length < MAX_LISTINGS_PER_AREA && offset < totalCount) {
+    const res = await airRoiPost<RadiusSearchResponse>("/listings/search/radius", {
+      latitude: center.lat,
+      longitude: center.lng,
+      radius: RADIUS_MILES,
+      pagination: { pageSize: PAGE_SIZE, offset },
+    });
+    apiCalls += 1;
+    totalCount = num(res.pagination?.total_count) ?? 0;
+    const page = res.results ?? [];
+    if (page.length === 0) break;
+    collected.push(...page);
+    offset += PAGE_SIZE;
   }
 
-  for (const item of listings.slice(0, MAX_LISTINGS_PER_AREA)) {
-    const rawId = pick(item, ["id", "listing_id", "airbnb_id", "listingId"]);
+  for (const raw of collected.slice(0, MAX_LISTINGS_PER_AREA)) {
+    const item = flatten(raw);
+    const rawId = pick(item, ["listing_id", "id", "listingId"]);
     if (rawId === undefined) continue;
     const airroiId = String(rawId);
-    const airbnbId = pick(item, ["airbnb_id", "id", "listing_id"]);
-    const maxGuests = num(pick(item, ["person_capacity", "accommodates", "max_guests", "guests", "capacity"])) ?? 1;
+    const maxGuests =
+      num(pick(item, ["person_capacity", "accommodates", "max_guests", "guests", "guest_limit", "capacity"])) ?? 1;
 
     await db.execute({
       sql: `INSERT INTO properties (id, airroi_id, airbnb_id, title, area, latitude, longitude, property_type, max_guests, bedrooms, bathrooms, rating, reviews_count, url, updated_at)
@@ -134,43 +160,34 @@ export async function fetchAndStoreAirRoiData(db: Client, area: string): Promise
       args: [
         `airroi_${airroiId}`,
         airroiId,
-        airbnbId !== undefined ? String(airbnbId) : null,
-        String(pick(item, ["title", "name", "listing_name"]) ?? `Listing ${airroiId}`),
+        airroiId,
+        String(pick(item, ["listing_name", "title", "name"]) ?? `Listing ${airroiId}`),
         area,
         num(pick(item, ["latitude", "lat"])),
         num(pick(item, ["longitude", "lng", "lon"])),
-        mapPropertyType(pick(item, ["property_type", "room_type", "propertyType"])),
+        mapPropertyType(pick(item, ["listing_type", "property_type", "room_type"])),
         maxGuests,
         num(pick(item, ["bedrooms", "bedroom_count"])) ?? 1,
         num(pick(item, ["bathrooms", "bathroom_count"])),
-        num(pick(item, ["rating", "review_score", "overall_rating", "star_rating"])),
-        num(pick(item, ["reviews_count", "number_of_reviews", "reviews", "review_count"])) ?? 0,
-        String(
-          pick(item, ["url", "listing_url"]) ??
-            (airbnbId !== undefined ? `https://www.airbnb.com/rooms/${airbnbId}` : ""),
-        ),
+        num(pick(item, ["rating", "overall_rating", "review_score", "guest_satisfaction"])),
+        num(pick(item, ["reviews_count", "number_of_reviews", "visible_review_count", "review_count"])) ?? 0,
+        `https://www.airbnb.com/rooms/${airroiId}`,
       ],
     });
     recordsFetched += 1;
 
-    // 2. 今後365日の料金・空室カレンダーを取得して増分保存
+    // 2. 今後365日の料金・空室カレンダーを取得しバッチでUPSERT
     try {
-      const ratesRes = await airRoiFetch<unknown>(
+      const ratesRes = await airRoiGet<FutureRatesResponse>(
         `/listings/future/rates?id=${encodeURIComponent(airroiId)}&currency=native`,
       );
       apiCalls += 1;
 
-      const days = firstArray(ratesRes, ["rates", "calendar", "days", "data", "future_rates"]);
-      for (const day of days) {
-        const date = pick(day, ["date", "day", "calendar_date"]);
-        const price = num(pick(day, ["rate", "price", "nightly_rate", "adr", "amount"]));
-        if (!date || price === null) continue;
-        const availableRaw = pick(day, ["available", "availability", "is_available", "status"]);
-        const available =
-          typeof availableRaw === "string"
-            ? availableRaw.toLowerCase() === "available" || availableRaw === "true"
-            : Boolean(availableRaw);
-        await db.execute({
+      const stmts: InStatement[] = [];
+      for (const day of ratesRes.rates ?? []) {
+        const price = num(day.rate);
+        if (!day.date || price === null || price <= 0) continue; // rate=0 は価格未設定日
+        stmts.push({
           sql: `INSERT INTO daily_metrics (property_id, target_date, price_jpy, price_per_person, is_available, min_nights, fetched_at)
                 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(property_id, target_date) DO UPDATE SET
@@ -179,17 +196,20 @@ export async function fetchAndStoreAirRoiData(db: Client, area: string): Promise
                   fetched_at=CURRENT_TIMESTAMP`,
           args: [
             `airroi_${airroiId}`,
-            String(date).slice(0, 10),
+            String(day.date).slice(0, 10),
             price,
             price / Math.max(maxGuests, 1),
-            available ? 1 : 0,
-            num(pick(day, ["min_stay", "min_nights", "minimum_stay", "minimum_nights"])) ?? 1,
+            day.available ? 1 : 0,
+            num(day.min_nights) ?? 1,
           ],
         });
-        recordsFetched += 1;
+      }
+      if (stmts.length > 0) {
+        await db.batch(stmts, "write");
+        recordsFetched += stmts.length;
       }
     } catch (err) {
-      // 1物件のカレンダー取得失敗で全体を止めない
+      // 1物件のカレンダー取得失敗で同期全体を止めない
       console.error(`AirROI: 物件 ${airroiId} のカレンダー取得に失敗:`, err);
     }
   }

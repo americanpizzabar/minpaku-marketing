@@ -43,15 +43,25 @@ function apiKeyOrThrow(): string {
   return apiKey;
 }
 
+/**
+ * listing_id は18〜19桁で Number.MAX_SAFE_INTEGER (約9.0e15) を超えるため、
+ * 通常の JSON.parse では末尾が丸められ「存在しないID」になってしまう。
+ * 16桁以上の整数リテラルを文字列に変換してからパースする。
+ */
+function parseJsonSafe<T>(text: string): T {
+  const quoted = text.replace(/([:[,]\s*)(\d{16,})(?=\s*[,}\]])/g, '$1"$2"');
+  return JSON.parse(quoted) as T;
+}
+
 async function airRoiGet<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     headers: { "x-api-key": apiKeyOrThrow(), Accept: "application/json" },
   });
+  const text = await res.text().catch(() => "");
   if (!res.ok) {
-    const body = (await res.text().catch(() => "")).slice(0, 300);
-    throw new Error(`AirROI API Error: ${res.status} ${res.statusText} (GET ${path}) ${body}`);
+    throw new Error(`AirROI API Error: ${res.status} ${res.statusText} (GET ${path}) ${text.slice(0, 300)}`);
   }
-  return res.json() as Promise<T>;
+  return parseJsonSafe<T>(text);
 }
 
 async function airRoiPost<T>(path: string, body: unknown): Promise<T> {
@@ -64,11 +74,11 @@ async function airRoiPost<T>(path: string, body: unknown): Promise<T> {
     },
     body: JSON.stringify(body),
   });
+  const text = await res.text().catch(() => "");
   if (!res.ok) {
-    const errBody = (await res.text().catch(() => "")).slice(0, 300);
-    throw new Error(`AirROI API Error: ${res.status} ${res.statusText} (POST ${path}) ${errBody}`);
+    throw new Error(`AirROI API Error: ${res.status} ${res.statusText} (POST ${path}) ${text.slice(0, 300)}`);
   }
-  return res.json() as Promise<T>;
+  return parseJsonSafe<T>(text);
 }
 
 type Json = Record<string, unknown>;
@@ -230,6 +240,12 @@ export async function syncAllAreas(
       totalRecords += result.recordsFetched;
       totalCalls += result.apiCalls;
     }
+    // カレンダーが1件も取れなかった物件は分析に使えないため削除 (ID丸め不具合の残骸掃除を兼ねる)
+    await db.execute(
+      `DELETE FROM properties
+       WHERE id LIKE 'airroi_%'
+         AND id NOT IN (SELECT DISTINCT property_id FROM daily_metrics)`,
+    );
     await db.execute({
       sql: `INSERT INTO sync_logs (sync_type, records_fetched, api_calls_count, status) VALUES (?, ?, ?, 'SUCCESS')`,
       args: [syncType, totalRecords, totalCalls],

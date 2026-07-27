@@ -152,48 +152,51 @@ export async function fetchAndStoreAirRoiData(db: Client, area: string): Promise
     offset += PAGE_SIZE;
   }
 
-  for (const raw of collected.slice(0, MAX_LISTINGS_PER_AREA)) {
+  // 2. 物件ごとに [物件UPSERT + カレンダー365日分] を1回のバッチにまとめ、
+  //    Vercelの実行時間制限 (300秒) に収まるよう CONCURRENCY 件ずつ並列処理する
+  const targets = collected.slice(0, MAX_LISTINGS_PER_AREA);
+
+  async function processListing(raw: Json): Promise<void> {
     const item = flatten(raw);
     const rawId = pick(item, ["listing_id", "id", "listingId"]);
-    if (rawId === undefined) continue;
+    if (rawId === undefined) return;
     const airroiId = String(rawId);
     const maxGuests =
       num(pick(item, ["person_capacity", "accommodates", "max_guests", "guests", "guest_limit", "capacity"])) ?? 1;
 
-    await db.execute({
-      sql: `INSERT INTO properties (id, airroi_id, airbnb_id, title, area, latitude, longitude, property_type, max_guests, bedrooms, bathrooms, rating, reviews_count, url, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(id) DO UPDATE SET
-              title=excluded.title, rating=excluded.rating, reviews_count=excluded.reviews_count,
-              max_guests=excluded.max_guests, bedrooms=excluded.bedrooms,
-              updated_at=CURRENT_TIMESTAMP`,
-      args: [
-        `airroi_${airroiId}`,
-        airroiId,
-        airroiId,
-        String(pick(item, ["listing_name", "title", "name"]) ?? `Listing ${airroiId}`),
-        area,
-        num(pick(item, ["latitude", "lat"])),
-        num(pick(item, ["longitude", "lng", "lon"])),
-        mapPropertyType(pick(item, ["listing_type", "property_type", "room_type"])),
-        maxGuests,
-        num(pick(item, ["bedrooms", "bedroom_count"])) ?? 1,
-        num(pick(item, ["bathrooms", "bathroom_count"])),
-        num(pick(item, ["rating", "overall_rating", "review_score", "guest_satisfaction"])),
-        num(pick(item, ["reviews_count", "number_of_reviews", "visible_review_count", "review_count"])) ?? 0,
-        `https://www.airbnb.com/rooms/${airroiId}`,
-      ],
-    });
-    recordsFetched += 1;
+    const stmts: InStatement[] = [
+      {
+        sql: `INSERT INTO properties (id, airroi_id, airbnb_id, title, area, latitude, longitude, property_type, max_guests, bedrooms, bathrooms, rating, reviews_count, url, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+              ON CONFLICT(id) DO UPDATE SET
+                title=excluded.title, rating=excluded.rating, reviews_count=excluded.reviews_count,
+                max_guests=excluded.max_guests, bedrooms=excluded.bedrooms,
+                updated_at=CURRENT_TIMESTAMP`,
+        args: [
+          `airroi_${airroiId}`,
+          airroiId,
+          airroiId,
+          String(pick(item, ["listing_name", "title", "name"]) ?? `Listing ${airroiId}`),
+          area,
+          num(pick(item, ["latitude", "lat"])),
+          num(pick(item, ["longitude", "lng", "lon"])),
+          mapPropertyType(pick(item, ["listing_type", "property_type", "room_type"])),
+          maxGuests,
+          num(pick(item, ["bedrooms", "bedroom_count"])) ?? 1,
+          num(pick(item, ["bathrooms", "bathroom_count"])),
+          num(pick(item, ["rating", "overall_rating", "review_score", "guest_satisfaction"])),
+          num(pick(item, ["reviews_count", "number_of_reviews", "visible_review_count", "review_count"])) ?? 0,
+          `https://www.airbnb.com/rooms/${airroiId}`,
+        ],
+      },
+    ];
 
-    // 2. 今後365日の料金・空室カレンダーを取得しバッチでUPSERT
     try {
       const ratesRes = await airRoiGet<FutureRatesResponse>(
         `/listings/future/rates?id=${encodeURIComponent(airroiId)}&currency=native`,
       );
       apiCalls += 1;
 
-      const stmts: InStatement[] = [];
       for (const day of ratesRes.rates ?? []) {
         const price = num(day.rate);
         if (!day.date || price === null || price <= 0) continue; // rate=0 は価格未設定日
@@ -214,14 +217,18 @@ export async function fetchAndStoreAirRoiData(db: Client, area: string): Promise
           ],
         });
       }
-      if (stmts.length > 0) {
-        await db.batch(stmts, "write");
-        recordsFetched += stmts.length;
-      }
     } catch (err) {
-      // 1物件のカレンダー取得失敗で同期全体を止めない
+      // 1物件のカレンダー取得失敗で同期全体を止めない (物件情報のみ保存)
       console.error(`AirROI: 物件 ${airroiId} のカレンダー取得に失敗:`, err);
     }
+
+    await db.batch(stmts, "write");
+    recordsFetched += stmts.length;
+  }
+
+  const CONCURRENCY = 5;
+  for (let i = 0; i < targets.length; i += CONCURRENCY) {
+    await Promise.all(targets.slice(i, i + CONCURRENCY).map(processListing));
   }
 
   return { recordsFetched, apiCalls };

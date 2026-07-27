@@ -5,11 +5,13 @@ import type { PropertyType } from "./types";
  * AirROI API クライアント (実機検証済みの仕様)
  * - ベースURL: https://api.airroi.com
  * - 認証: x-api-key ヘッダ
- * - エリア検索: POST /listings/search/radius
- *     body: { latitude, longitude, radius, pagination: { pageSize(最大10), offset } }
- *     res:  { pagination: { total_count, page_size, offset }, results: [{ listing_info: {...} }] }
- * - 日別料金/空室: GET /listings/future/rates?id=<listing_id>&currency=native
- *     res:  { rates: [{ date, available, rate, min_nights }] }
+ * - エリア検索: POST /listings/search/radius ($0.50/コール, pageSize最大10)
+ * - 日別料金/空室: GET /listings/future/rates?id=<listing_id>&currency=native ($0.10/コール)
+ *
+ * Pay-per-call のため、同期は増分方式:
+ * - 物件カタログ (エリア検索) は SEARCH_REFRESH_DAYS ごとにのみ再取得
+ * - 料金カレンダーは物件ごとに RATES_REFRESH_DAYS 経過したものだけ、
+ *   1回の同期あたり DAILY_RATES_CALLS 件を上限に更新 (古い順)
  */
 const BASE_URL = (process.env.AIRROI_API_BASE_URL ?? "https://api.airroi.com").replace(/\/$/, "");
 
@@ -21,15 +23,23 @@ const AREA_SEARCH: Record<string, { lat: number; lng: number }> = {
   忍野村: { lat: 35.46, lng: 138.845 },
 };
 
-const RADIUS_MILES = Number(process.env.AIRROI_RADIUS_MILES ?? 3);
-// Pay-per-call コスト管理: 1エリアあたりのカレンダー取得件数上限
-const MAX_LISTINGS_PER_AREA = Number(process.env.AIRROI_MAX_LISTINGS_PER_AREA ?? 100);
-const PAGE_SIZE = 10; // APIの上限
+export const ALL_AREAS = Object.keys(AREA_SEARCH);
 
-export interface SyncResult {
-  recordsFetched: number;
-  apiCalls: number;
-}
+const RADIUS_MILES = Number(process.env.AIRROI_RADIUS_MILES ?? 3);
+const MAX_LISTINGS_PER_AREA = Number(process.env.AIRROI_MAX_LISTINGS_PER_AREA ?? 100);
+const PAGE_SIZE = 10; // 検索APIの上限
+
+// コスト管理ノブ (すべて環境変数で調整可能)
+const SEARCH_REFRESH_DAYS = Number(process.env.AIRROI_SEARCH_REFRESH_DAYS ?? 30);
+const RATES_REFRESH_DAYS = Number(process.env.AIRROI_RATES_REFRESH_DAYS ?? 14);
+export const DAILY_RATES_CALLS = Number(process.env.AIRROI_DAILY_RATES_CALLS ?? 40);
+
+export const COST_PER_SEARCH_CALL = 0.5; // USD
+export const COST_PER_RATES_CALL = 0.1; // USD
+
+// Vercelの関数実行制限 (300秒) に対する1実行あたりの処理時間上限
+const HARD_BUDGET_MS = 200_000;
+const CONCURRENCY = 10;
 
 function cleanEnv(value: string | undefined): string | undefined {
   if (!value) return undefined;
@@ -123,17 +133,18 @@ interface RadiusSearchResponse {
 }
 
 interface FutureRatesResponse {
-  rates?: { date?: string; available?: boolean; rate?: number; min_nights?: number }[];
+  rates?: { date?: string; available?: unknown; rate?: unknown; min_nights?: unknown }[];
 }
 
-export async function fetchAndStoreAirRoiData(db: Client, area: string): Promise<SyncResult> {
-  let apiCalls = 0;
-  let recordsFetched = 0;
-
+/** エリアの物件カタログを再取得して properties をUPSERTする (料金は取得しない) */
+async function refreshAreaCatalog(
+  db: Client,
+  area: string,
+): Promise<{ searchCalls: number; listings: number }> {
   const center = AREA_SEARCH[area];
-  if (!center) return { recordsFetched, apiCalls };
+  if (!center) return { searchCalls: 0, listings: 0 };
 
-  // 1. 半径検索 (pageSize上限10のためページングで収集)
+  let searchCalls = 0;
   const collected: Json[] = [];
   let offset = 0;
   let totalCount = Infinity;
@@ -144,7 +155,7 @@ export async function fetchAndStoreAirRoiData(db: Client, area: string): Promise
       radius: RADIUS_MILES,
       pagination: { pageSize: PAGE_SIZE, offset },
     });
-    apiCalls += 1;
+    searchCalls += 1;
     totalCount = num(res.pagination?.total_count) ?? 0;
     const page = res.results ?? [];
     if (page.length === 0) break;
@@ -152,180 +163,239 @@ export async function fetchAndStoreAirRoiData(db: Client, area: string): Promise
     offset += PAGE_SIZE;
   }
 
-  // 2. 物件ごとに [物件UPSERT + カレンダー365日分] を1回のバッチにまとめ、
-  //    Vercelの実行時間制限 (300秒) に収まるよう CONCURRENCY 件ずつ並列処理する
-  const targets = collected.slice(0, MAX_LISTINGS_PER_AREA);
-
-  async function processListing(raw: Json): Promise<void> {
+  const stmts: InStatement[] = [];
+  for (const raw of collected.slice(0, MAX_LISTINGS_PER_AREA)) {
     const item = flatten(raw);
     const rawId = pick(item, ["listing_id", "id", "listingId"]);
-    if (rawId === undefined) return;
+    if (rawId === undefined) continue;
     const airroiId = String(rawId);
     const maxGuests =
       num(pick(item, ["person_capacity", "accommodates", "max_guests", "guests", "guest_limit", "capacity"])) ?? 1;
-
-    const stmts: InStatement[] = [
-      {
-        sql: `INSERT INTO properties (id, airroi_id, airbnb_id, title, area, latitude, longitude, property_type, max_guests, bedrooms, bathrooms, rating, reviews_count, url, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-              ON CONFLICT(id) DO UPDATE SET
-                title=excluded.title, rating=excluded.rating, reviews_count=excluded.reviews_count,
-                max_guests=excluded.max_guests, bedrooms=excluded.bedrooms,
-                updated_at=CURRENT_TIMESTAMP`,
-        args: [
-          `airroi_${airroiId}`,
-          airroiId,
-          airroiId,
-          String(pick(item, ["listing_name", "title", "name"]) ?? `Listing ${airroiId}`),
-          area,
-          num(pick(item, ["latitude", "lat"])),
-          num(pick(item, ["longitude", "lng", "lon"])),
-          mapPropertyType(pick(item, ["listing_type", "property_type", "room_type"])),
-          maxGuests,
-          num(pick(item, ["bedrooms", "bedroom_count"])) ?? 1,
-          num(pick(item, ["bathrooms", "bathroom_count"])),
-          num(pick(item, ["rating", "overall_rating", "review_score", "guest_satisfaction"])),
-          num(pick(item, ["reviews_count", "number_of_reviews", "visible_review_count", "review_count"])) ?? 0,
-          `https://www.airbnb.com/rooms/${airroiId}`,
-        ],
-      },
-    ];
-
-    try {
-      const ratesRes = await airRoiGet<FutureRatesResponse>(
-        `/listings/future/rates?id=${encodeURIComponent(airroiId)}&currency=native`,
-      );
-      apiCalls += 1;
-
-      for (const day of ratesRes.rates ?? []) {
-        if (!day.date) continue;
-        const rawPrice = num(day.rate);
-        const available = Boolean(day.available);
-        // 予約不可日の rate はAirbnbが返すダミー価格 (数百万円等) のため採用しない。
-        // 価格は「予約可能日の表示価格」のみ保存し、0 は価格情報なしを意味する。
-        const price = available && rawPrice !== null && rawPrice > 0 ? rawPrice : 0;
-        stmts.push({
-          sql: `INSERT INTO daily_metrics (property_id, target_date, price_jpy, price_per_person, is_available, min_nights, fetched_at)
-                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(property_id, target_date) DO UPDATE SET
-                  price_jpy=CASE WHEN excluded.price_jpy > 0 THEN excluded.price_jpy ELSE daily_metrics.price_jpy END,
-                  price_per_person=CASE WHEN excluded.price_jpy > 0 THEN excluded.price_per_person ELSE daily_metrics.price_per_person END,
-                  is_available=excluded.is_available, min_nights=excluded.min_nights,
-                  fetched_at=CURRENT_TIMESTAMP`,
-          args: [
-            `airroi_${airroiId}`,
-            String(day.date).slice(0, 10),
-            price,
-            price / Math.max(maxGuests, 1),
-            available ? 1 : 0,
-            num(day.min_nights) ?? 1,
-          ],
-        });
-      }
-    } catch (err) {
-      // 1物件のカレンダー取得失敗で同期全体を止めない (物件情報のみ保存)
-      console.error(`AirROI: 物件 ${airroiId} のカレンダー取得に失敗:`, err);
-    }
-
-    await db.batch(stmts, "write");
-    recordsFetched += stmts.length;
+    stmts.push({
+      sql: `INSERT INTO properties (id, airroi_id, airbnb_id, title, area, latitude, longitude, property_type, max_guests, bedrooms, bathrooms, rating, reviews_count, url, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(id) DO UPDATE SET
+              title=excluded.title, rating=excluded.rating, reviews_count=excluded.reviews_count,
+              max_guests=excluded.max_guests, bedrooms=excluded.bedrooms,
+              updated_at=CURRENT_TIMESTAMP`,
+      args: [
+        `airroi_${airroiId}`,
+        airroiId,
+        airroiId,
+        String(pick(item, ["listing_name", "title", "name"]) ?? `Listing ${airroiId}`),
+        area,
+        num(pick(item, ["latitude", "lat"])),
+        num(pick(item, ["longitude", "lng", "lon"])),
+        mapPropertyType(pick(item, ["listing_type", "property_type", "room_type"])),
+        maxGuests,
+        num(pick(item, ["bedrooms", "bedroom_count"])) ?? 1,
+        num(pick(item, ["bathrooms", "bathroom_count"])),
+        num(pick(item, ["rating", "overall_rating", "review_score", "guest_satisfaction"])),
+        num(pick(item, ["reviews_count", "number_of_reviews", "visible_review_count", "review_count"])) ?? 0,
+        `https://www.airbnb.com/rooms/${airroiId}`,
+      ],
+    });
   }
-
-  const CONCURRENCY = 10;
-  for (let i = 0; i < targets.length; i += CONCURRENCY) {
-    await Promise.all(targets.slice(i, i + CONCURRENCY).map(processListing));
-  }
-
-  return { recordsFetched, apiCalls };
+  stmts.push({
+    sql: `INSERT INTO sync_state (key, value) VALUES (?, datetime('now'))
+          ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+    args: [`catalog:${area}`],
+  });
+  await db.batch(stmts, "write");
+  return { searchCalls, listings: stmts.length - 1 };
 }
 
-export const ALL_AREAS = Object.keys(AREA_SEARCH);
+interface StaleProp {
+  id: string;
+  airroiId: string;
+  maxGuests: number;
+}
 
-export interface ChunkedSyncResult {
+/** 1物件の料金カレンダー (今後365日) を取得してUPSERTする */
+async function refreshRatesForProperty(db: Client, p: StaleProp): Promise<number> {
+  const stmts: InStatement[] = [];
+  try {
+    const ratesRes = await airRoiGet<FutureRatesResponse>(
+      `/listings/future/rates?id=${encodeURIComponent(p.airroiId)}&currency=native`,
+    );
+    for (const day of ratesRes.rates ?? []) {
+      if (!day.date) continue;
+      const rawPrice = num(day.rate);
+      const available = Boolean(day.available);
+      // 予約不可日の rate はAirbnbが返すダミー価格 (数百万円等) のため採用しない。
+      // 価格は「予約可能日の表示価格」のみ保存し、0 は価格情報なしを意味する。
+      const price = available && rawPrice !== null && rawPrice > 0 ? rawPrice : 0;
+      stmts.push({
+        sql: `INSERT INTO daily_metrics (property_id, target_date, price_jpy, price_per_person, is_available, min_nights, fetched_at)
+              VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+              ON CONFLICT(property_id, target_date) DO UPDATE SET
+                price_jpy=CASE WHEN excluded.price_jpy > 0 THEN excluded.price_jpy ELSE daily_metrics.price_jpy END,
+                price_per_person=CASE WHEN excluded.price_jpy > 0 THEN excluded.price_per_person ELSE daily_metrics.price_per_person END,
+                is_available=excluded.is_available, min_nights=excluded.min_nights,
+                fetched_at=CURRENT_TIMESTAMP`,
+        args: [
+          p.id,
+          String(day.date).slice(0, 10),
+          price,
+          price / Math.max(p.maxGuests, 1),
+          available ? 1 : 0,
+          num(day.min_nights) ?? 1,
+        ],
+      });
+    }
+  } catch (err) {
+    // 取得失敗 (掲載終了等) でも rates_synced_at は進め、次周期まで再試行しない
+    console.error(`AirROI: 物件 ${p.airroiId} のカレンダー取得に失敗:`, err);
+  }
+  const records = stmts.length;
+  stmts.push({
+    sql: `UPDATE properties SET rates_synced_at=CURRENT_TIMESTAMP WHERE id=?`,
+    args: [p.id],
+  });
+  await db.batch(stmts, "write");
+  return records;
+}
+
+export interface SyncStepResult {
   status: "SUCCESS" | "PARTIAL" | "FAILED";
-  syncedAreas: string[];
-  remainingAreas: string[];
-  recordsFetched: number;
+  catalogRefreshed: string[];
+  catalogRemaining: string[];
+  ratesRefreshed: number;
+  ratesRemaining: number;
+  searchCalls: number;
+  ratesCalls: number;
   apiCalls: number;
+  estimatedCostUsd: number;
+  recordsFetched: number;
+  capRemaining: number | null; // null = 上限なし (reset/force時)
+  message?: string;
   error?: string;
 }
 
 /**
- * 指定エリアを時間予算内で順に同期する。
- * Vercelの実行時間制限 (300秒) があるため、予算を超えたら残りエリアを返し、
- * 呼び出し側 (APIルート) が自分自身を再呼び出しして続きを処理する。
+ * 増分同期を1ステップ実行する。
+ * - カタログが SEARCH_REFRESH_DAYS より古いエリアを再検索
+ * - 料金が RATES_REFRESH_DAYS より古い物件を古い順に更新 (capRemaining 件まで)
+ * 時間予算内に終わらなかった分は PARTIAL で返し、呼び出し側がチェーンで継続する。
  */
-export async function syncAreasChunked(
+export async function syncStep(
   db: Client,
-  areas: string[],
   syncType: "cron_daily" | "manual_refresh",
-  // 1エリア約100物件で最大3分近くかかるため、予算超過後に次エリアを
-  // 開始しないよう低めに設定 (実質1実行=1〜2エリア、残りはチェーンで継続)
-  timeBudgetMs = 60_000,
-): Promise<ChunkedSyncResult> {
+  capRemaining: number | null,
+): Promise<SyncStepResult> {
   const startedAt = Date.now();
-  const syncedAreas: string[] = [];
-  let totalRecords = 0;
-  let totalCalls = 0;
+  const catalogRefreshed: string[] = [];
+  let searchCalls = 0;
+  let ratesCalls = 0;
+  let ratesRefreshed = 0;
+  let recordsFetched = 0;
 
-  try {
-    for (const area of areas) {
-      if (syncedAreas.length > 0 && Date.now() - startedAt > timeBudgetMs) break;
-      const areaStart = Date.now();
-      const result = await fetchAndStoreAirRoiData(db, area);
-      totalRecords += result.recordsFetched;
-      totalCalls += result.apiCalls;
-      syncedAreas.push(area);
-      console.log(
-        `AirROI sync: ${area} 完了 (${result.recordsFetched}件, API ${result.apiCalls}回, ${Date.now() - areaStart}ms)`,
-      );
-    }
-
-    const remainingAreas = areas.filter((a) => !syncedAreas.includes(a));
-    const complete = remainingAreas.length === 0;
-
-    if (complete) {
-      // カレンダーが1件も取れなかった物件は分析に使えないため削除
-      await db.execute(
-        `DELETE FROM properties
-         WHERE id LIKE 'airroi_%'
-           AND id NOT IN (SELECT DISTINCT property_id FROM daily_metrics)`,
-      );
-    }
-
-    await db.execute({
-      sql: `INSERT INTO sync_logs (sync_type, records_fetched, api_calls_count, status, error_message) VALUES (?, ?, ?, ?, ?)`,
-      args: [
-        syncType,
-        totalRecords,
-        totalCalls,
-        complete ? "SUCCESS" : "PARTIAL",
-        complete ? null : `同期済: ${syncedAreas.join(",")} / 残り: ${remainingAreas.join(",")}`,
-      ],
-    });
-
-    return {
-      status: complete ? "SUCCESS" : "PARTIAL",
-      syncedAreas,
-      remainingAreas,
-      recordsFetched: totalRecords,
-      apiCalls: totalCalls,
-    };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+  const finalize = async (
+    status: SyncStepResult["status"],
+    catalogRemaining: string[],
+    ratesRemaining: number,
+    message?: string,
+    error?: string,
+  ): Promise<SyncStepResult> => {
+    const estimatedCostUsd =
+      Math.round((searchCalls * COST_PER_SEARCH_CALL + ratesCalls * COST_PER_RATES_CALL) * 100) / 100;
     await db
       .execute({
-        sql: `INSERT INTO sync_logs (sync_type, records_fetched, api_calls_count, status, error_message) VALUES (?, ?, ?, 'FAILED', ?)`,
-        args: [syncType, totalRecords, totalCalls, message],
+        sql: `INSERT INTO sync_logs (sync_type, records_fetched, api_calls_count, status, error_message) VALUES (?, ?, ?, ?, ?)`,
+        args: [
+          syncType,
+          recordsFetched,
+          searchCalls + ratesCalls,
+          status,
+          error ?? message ?? null,
+        ],
       })
       .catch(() => {});
+    console.log(
+      `AirROI sync: status=${status} catalog=${catalogRefreshed.join("/") || "-"} rates=${ratesRefreshed}件 残り${ratesRemaining}物件 コスト$${estimatedCostUsd}`,
+    );
     return {
-      status: "FAILED",
-      syncedAreas,
-      remainingAreas: areas.filter((a) => !syncedAreas.includes(a)),
-      recordsFetched: totalRecords,
-      apiCalls: totalCalls,
-      error: message,
+      status,
+      catalogRefreshed,
+      catalogRemaining,
+      ratesRefreshed,
+      ratesRemaining,
+      searchCalls,
+      ratesCalls,
+      apiCalls: searchCalls + ratesCalls,
+      estimatedCostUsd,
+      recordsFetched,
+      capRemaining,
+      message,
+      error,
     };
+  };
+
+  try {
+    // 1. カタログ更新が必要なエリア (sync_state の catalog:<area> が古い/未登録)
+    const freshRes = await db.execute({
+      sql: `SELECT key FROM sync_state WHERE key LIKE 'catalog:%' AND value >= datetime('now', ?)`,
+      args: [`-${SEARCH_REFRESH_DAYS} days`],
+    });
+    const fresh = new Set(freshRes.rows.map((r) => String(r.key).slice("catalog:".length)));
+    let staleAreas = ALL_AREAS.filter((a) => !fresh.has(a));
+
+    for (const area of [...staleAreas]) {
+      if (Date.now() - startedAt > HARD_BUDGET_MS) break;
+      const r = await refreshAreaCatalog(db, area);
+      searchCalls += r.searchCalls;
+      catalogRefreshed.push(area);
+      staleAreas = staleAreas.filter((a) => a !== area);
+      console.log(`AirROI sync: カタログ更新 ${area} (${r.listings}物件, 検索${r.searchCalls}回)`);
+    }
+
+    // 2. 料金カレンダーが古い物件を古い順に更新
+    const staleCondition = `id LIKE 'airroi_%' AND (rates_synced_at IS NULL OR rates_synced_at < datetime('now', ?))`;
+    const staleArg = `-${RATES_REFRESH_DAYS} days`;
+    while (
+      (capRemaining === null || capRemaining > 0) &&
+      Date.now() - startedAt < HARD_BUDGET_MS
+    ) {
+      const limit = capRemaining === null ? CONCURRENCY : Math.min(CONCURRENCY, capRemaining);
+      const staleRes = await db.execute({
+        sql: `SELECT id, airroi_id, max_guests FROM properties WHERE ${staleCondition} ORDER BY rates_synced_at ASC LIMIT ?`,
+        args: [staleArg, limit],
+      });
+      if (staleRes.rows.length === 0) break;
+      const results = await Promise.all(
+        staleRes.rows.map((r) =>
+          refreshRatesForProperty(db, {
+            id: String(r.id),
+            airroiId: String(r.airroi_id),
+            maxGuests: Number(r.max_guests) || 1,
+          }),
+        ),
+      );
+      ratesCalls += staleRes.rows.length;
+      ratesRefreshed += staleRes.rows.length;
+      recordsFetched += results.reduce((a, b) => a + b, 0);
+      if (capRemaining !== null) capRemaining -= staleRes.rows.length;
+    }
+
+    // 3. 残作業を数えて状態を決める
+    const remainRes = await db.execute({
+      sql: `SELECT COUNT(*) AS c FROM properties WHERE ${staleCondition}`,
+      args: [staleArg],
+    });
+    const ratesRemaining = Number(remainRes.rows[0]?.c ?? 0);
+    const capExhausted = capRemaining !== null && capRemaining <= 0;
+    const workRemains = staleAreas.length > 0 || ratesRemaining > 0;
+
+    if (workRemains && !capExhausted) {
+      return finalize("PARTIAL", staleAreas, ratesRemaining, "残り作業をチェーンで継続します");
+    }
+    const message =
+      capExhausted && ratesRemaining > 0
+        ? `1回の同期の呼び出し上限 (${DAILY_RATES_CALLS}件) に達しました。残り${ratesRemaining}物件は次回の同期で更新されます`
+        : undefined;
+    return finalize("SUCCESS", staleAreas, ratesRemaining, message);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return finalize("FAILED", [], -1, undefined, message);
   }
 }

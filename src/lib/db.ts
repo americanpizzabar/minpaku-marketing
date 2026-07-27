@@ -95,10 +95,29 @@ export const SCHEMA_SQL = [
     error_message TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
+  `CREATE TABLE IF NOT EXISTS sync_state (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  )`,
 ];
 
 export async function ensureSchema(db: Client): Promise<void> {
   for (const sql of SCHEMA_SQL) {
     await db.execute(sql);
+  }
+  // 増分マイグレーション: 物件別の料金カレンダー最終取得時刻 (増分同期のコスト管理に使用)
+  try {
+    await db.execute("ALTER TABLE properties ADD COLUMN rates_synced_at DATETIME");
+    // 列を今追加できた場合のみ、既存データから初期値をバックフィルする
+    await db.execute(
+      `UPDATE properties SET rates_synced_at =
+         (SELECT MAX(fetched_at) FROM daily_metrics WHERE property_id = properties.id)`,
+    );
+    await db.execute(
+      `INSERT OR IGNORE INTO sync_state (key, value)
+         SELECT 'catalog:' || area, datetime('now') FROM properties GROUP BY area`,
+    );
+  } catch {
+    // 列が既に存在する場合は何もしない
   }
 }

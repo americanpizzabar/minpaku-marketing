@@ -42,8 +42,12 @@ export default function Sidebar({ dataSource }: { dataSource: "turso" | "demo" }
     try {
       const res = await fetch("/api/sync", { method: "POST" });
       const json = await res.json();
-      if (json.status === "SUCCESS") {
-        setSyncMessage(`同期完了: ${json.recordsFetched}件取得 (APIコール${json.apiCalls}回)`);
+      if (json.status === "SUCCESS" || json.status === "PARTIAL") {
+        const cost = json.estimatedCostUsd != null ? ` / 約$${json.estimatedCostUsd}` : "";
+        const extra = json.message ? ` — ${json.message}` : "";
+        setSyncMessage(
+          `同期${json.status === "PARTIAL" ? "継続中" : "完了"}: 料金更新${json.ratesRefreshed ?? 0}物件 (APIコール${json.apiCalls}回${cost})${extra}`,
+        );
         router.refresh();
       } else {
         setSyncMessage(json.message ?? json.error ?? "同期に失敗しました");

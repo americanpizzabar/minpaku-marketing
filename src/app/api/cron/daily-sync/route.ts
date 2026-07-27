@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { syncAllAreas } from "@/lib/airroi";
-import { ensureSchema, getDb } from "@/lib/db";
+import { runChunkedSync } from "@/lib/sync-runner";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 /**
  * Vercel Cron から毎日 18:00 UTC (JST 深夜3時) に呼び出される日次同期。
+ * 時間予算を超えた分は /api/sync への自己呼び出しで自動的に引き継がれる。
  * vercel.json の crons 設定を参照。
  */
 export async function GET(request: NextRequest) {
@@ -18,18 +18,9 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  const db = getDb();
-  if (!db) {
-    return NextResponse.json({
-      status: "SKIPPED",
-      message: "TURSO_DATABASE_URL が未設定のため同期をスキップしました (デモモード)",
-    });
-  }
-
   try {
-    await ensureSchema(db);
-    const result = await syncAllAreas(db, "cron_daily");
-    return NextResponse.json(result, { status: result.status === "SUCCESS" ? 200 : 500 });
+    const result = await runChunkedSync("cron_daily");
+    return NextResponse.json(result, { status: result.status === "FAILED" ? 500 : 200 });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ status: "FAILED", error: message }, { status: 500 });

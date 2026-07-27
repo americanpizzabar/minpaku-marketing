@@ -234,36 +234,91 @@ export async function fetchAndStoreAirRoiData(db: Client, area: string): Promise
   return { recordsFetched, apiCalls };
 }
 
-/** 全対象エリアを同期し、sync_logs に結果を記録する */
-export async function syncAllAreas(
+export const ALL_AREAS = Object.keys(AREA_SEARCH);
+
+export interface ChunkedSyncResult {
+  status: "SUCCESS" | "PARTIAL" | "FAILED";
+  syncedAreas: string[];
+  remainingAreas: string[];
+  recordsFetched: number;
+  apiCalls: number;
+  error?: string;
+}
+
+/**
+ * 指定エリアを時間予算内で順に同期する。
+ * Vercelの実行時間制限 (300秒) があるため、予算を超えたら残りエリアを返し、
+ * 呼び出し側 (APIルート) が自分自身を再呼び出しして続きを処理する。
+ */
+export async function syncAreasChunked(
   db: Client,
+  areas: string[],
   syncType: "cron_daily" | "manual_refresh",
-): Promise<{ recordsFetched: number; apiCalls: number; status: string; error?: string }> {
+  timeBudgetMs = 150_000,
+): Promise<ChunkedSyncResult> {
+  const startedAt = Date.now();
+  const syncedAreas: string[] = [];
   let totalRecords = 0;
   let totalCalls = 0;
+
   try {
-    for (const area of Object.keys(AREA_SEARCH)) {
+    for (const area of areas) {
+      if (syncedAreas.length > 0 && Date.now() - startedAt > timeBudgetMs) break;
+      const areaStart = Date.now();
       const result = await fetchAndStoreAirRoiData(db, area);
       totalRecords += result.recordsFetched;
       totalCalls += result.apiCalls;
+      syncedAreas.push(area);
+      console.log(
+        `AirROI sync: ${area} 完了 (${result.recordsFetched}件, API ${result.apiCalls}回, ${Date.now() - areaStart}ms)`,
+      );
     }
-    // カレンダーが1件も取れなかった物件は分析に使えないため削除 (ID丸め不具合の残骸掃除を兼ねる)
-    await db.execute(
-      `DELETE FROM properties
-       WHERE id LIKE 'airroi_%'
-         AND id NOT IN (SELECT DISTINCT property_id FROM daily_metrics)`,
-    );
+
+    const remainingAreas = areas.filter((a) => !syncedAreas.includes(a));
+    const complete = remainingAreas.length === 0;
+
+    if (complete) {
+      // カレンダーが1件も取れなかった物件は分析に使えないため削除
+      await db.execute(
+        `DELETE FROM properties
+         WHERE id LIKE 'airroi_%'
+           AND id NOT IN (SELECT DISTINCT property_id FROM daily_metrics)`,
+      );
+    }
+
     await db.execute({
-      sql: `INSERT INTO sync_logs (sync_type, records_fetched, api_calls_count, status) VALUES (?, ?, ?, 'SUCCESS')`,
-      args: [syncType, totalRecords, totalCalls],
+      sql: `INSERT INTO sync_logs (sync_type, records_fetched, api_calls_count, status, error_message) VALUES (?, ?, ?, ?, ?)`,
+      args: [
+        syncType,
+        totalRecords,
+        totalCalls,
+        complete ? "SUCCESS" : "PARTIAL",
+        complete ? null : `同期済: ${syncedAreas.join(",")} / 残り: ${remainingAreas.join(",")}`,
+      ],
     });
-    return { recordsFetched: totalRecords, apiCalls: totalCalls, status: "SUCCESS" };
+
+    return {
+      status: complete ? "SUCCESS" : "PARTIAL",
+      syncedAreas,
+      remainingAreas,
+      recordsFetched: totalRecords,
+      apiCalls: totalCalls,
+    };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    await db.execute({
-      sql: `INSERT INTO sync_logs (sync_type, records_fetched, api_calls_count, status, error_message) VALUES (?, ?, ?, 'FAILED', ?)`,
-      args: [syncType, totalRecords, totalCalls, message],
-    });
-    return { recordsFetched: totalRecords, apiCalls: totalCalls, status: "FAILED", error: message };
+    await db
+      .execute({
+        sql: `INSERT INTO sync_logs (sync_type, records_fetched, api_calls_count, status, error_message) VALUES (?, ?, ?, 'FAILED', ?)`,
+        args: [syncType, totalRecords, totalCalls, message],
+      })
+      .catch(() => {});
+    return {
+      status: "FAILED",
+      syncedAreas,
+      remainingAreas: areas.filter((a) => !syncedAreas.includes(a)),
+      recordsFetched: totalRecords,
+      apiCalls: totalCalls,
+      error: message,
+    };
   }
 }

@@ -259,7 +259,9 @@ export async function syncAreasChunked(
   db: Client,
   areas: string[],
   syncType: "cron_daily" | "manual_refresh",
-  timeBudgetMs = 150_000,
+  // 1エリア約100物件で最大3分近くかかるため、予算超過後に次エリアを
+  // 開始しないよう低めに設定 (実質1実行=1〜2エリア、残りはチェーンで継続)
+  timeBudgetMs = 60_000,
 ): Promise<ChunkedSyncResult> {
   const startedAt = Date.now();
   const syncedAreas: string[] = [];

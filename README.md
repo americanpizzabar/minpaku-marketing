@@ -29,10 +29,28 @@ npm run dev
 
 ### Turso DB を使う場合
 
-1. [Turso](https://turso.tech/) でデータベースを作成
-2. `.env.local` に `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` を設定
-3. スキーマ作成: `npm run db:migrate`
-4. AirROIの `AIRROI_API_KEY` を設定し、ダッシュボードの「データ手動更新」ボタンまたは `POST /api/sync` で初回同期
+スキーマは初回アクセス時に自動作成されるため、`db:migrate` の手動実行は不要です。
+
+1. [Turso](https://turso.tech/) にサインアップ (GitHubログイン可) し、CLIをインストール
+
+   ```bash
+   curl -sSfL https://get.tur.so/install.sh | bash
+   turso auth login
+   ```
+
+2. データベースを作成し、接続情報を取得 (リージョンは東京 `nrt` 推奨)
+
+   ```bash
+   turso db create lumina-fuji --location nrt
+   turso db show lumina-fuji --url        # → TURSO_DATABASE_URL
+   turso db tokens create lumina-fuji     # → TURSO_AUTH_TOKEN
+   ```
+
+   ※ CLIを使わない場合は [Tursoダッシュボード](https://app.turso.tech/) からもDB作成・トークン発行が可能です。
+
+3. `.env.local` (ローカル) または Vercel の環境変数に `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` を設定
+4. (任意) 自社実績の初期データ投入: `npx tsx scripts/seed-lumina.ts`
+5. AirROIの `AIRROI_API_KEY` を設定し、ダッシュボードの「データ手動更新」ボタンまたは `POST /api/sync` で初回同期
 
 ### Vercel へのデプロイ
 

@@ -1,4 +1,4 @@
-import { getDb, isDbConfigured } from "./db";
+import { ensureSchema, getDb, isDbConfigured } from "./db";
 import {
   generateDemoLuminaMetrics,
   generateDemoMetrics,
@@ -65,6 +65,8 @@ export async function loadDataset(
   };
 }
 
+let schemaReady: Promise<void> | null = null;
+
 async function loadFromTurso(
   start: string,
   end: string,
@@ -72,6 +74,10 @@ async function loadFromTurso(
   pacingEnd: string,
 ): Promise<Dataset> {
   const db = getDb()!;
+
+  // 初回アクセス時にスキーマを自動作成する (migrate実行を不要にする)
+  if (!schemaReady) schemaReady = ensureSchema(db);
+  await schemaReady;
 
   const [propsRes, metricsRes, luminaRes, pacingRes, syncRes] = await Promise.all([
     db.execute("SELECT * FROM properties"),

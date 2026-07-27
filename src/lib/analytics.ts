@@ -1,0 +1,276 @@
+import { loadDataset } from "./data";
+import { matchesDayType, rangeForTimeRange, todayJst, toDateStr, addDays } from "./dates";
+import { LUMINA_PROFILE } from "./demo-data";
+import {
+  CAPACITY_BUCKETS,
+  TIME_RANGES,
+  type BenchmarkPoint,
+  type CapacityBar,
+  type DailyMetric,
+  type DashboardData,
+  type Filters,
+  type Kpis,
+  type Property,
+  type PropertyRow,
+  type ScatterPoint,
+  type TrendPoint,
+} from "./types";
+
+function avg(nums: number[]): number {
+  if (nums.length === 0) return 0;
+  return nums.reduce((a, b) => a + b, 0) / nums.length;
+}
+
+function percentile(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0;
+  const idx = Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length));
+  return sorted[idx];
+}
+
+function matchesFilters(p: Property, f: Filters): boolean {
+  if (f.area !== "all" && p.area !== f.area) return false;
+  if (f.propertyType !== "all" && p.propertyType !== f.propertyType) return false;
+  if (f.capacity !== "all") {
+    const bucket = CAPACITY_BUCKETS.find((b) => b.value === f.capacity);
+    if (bucket && (p.maxGuests < bucket.min || p.maxGuests > bucket.max)) return false;
+  }
+  if (f.bedrooms !== "all") {
+    if (f.bedrooms === "3+" ? p.bedrooms < 3 : p.bedrooms !== Number(f.bedrooms)) return false;
+  }
+  return true;
+}
+
+function capacityBucketOf(guests: number): string {
+  for (const b of CAPACITY_BUCKETS) {
+    if (guests >= b.min && guests <= b.max) return b.label;
+  }
+  return CAPACITY_BUCKETS[CAPACITY_BUCKETS.length - 1].label;
+}
+
+interface PropertyStats {
+  prices: number[];
+  booked: number;
+  total: number;
+}
+
+export async function getDashboardData(filters: Filters): Promise<DashboardData> {
+  const { start, end } = rangeForTimeRange(filters.timeRange);
+  const today = todayJst();
+  const pacingStart = toDateStr(today);
+  const pacingEnd = toDateStr(addDays(today, 59));
+
+  const ds = await loadDataset(start, end, pacingStart, pacingEnd);
+
+  // 1. 物件属性でフィルタ
+  let props = ds.properties.filter((p) => matchesFilters(p, filters));
+
+  // 2. 曜日タイプで日次データをフィルタ
+  const dayFiltered = ds.metrics.filter((m) => matchesDayType(m.targetDate, filters.dayType));
+  const luminaFiltered = ds.lumina.filter((m) => matchesDayType(m.targetDate, filters.dayType));
+
+  // 3. 物件ごとの統計を先に計算し、価格帯フィルタを適用
+  const statsMap = new Map<string, PropertyStats>();
+  for (const m of dayFiltered) {
+    let s = statsMap.get(m.propertyId);
+    if (!s) {
+      s = { prices: [], booked: 0, total: 0 };
+      statsMap.set(m.propertyId, s);
+    }
+    s.prices.push(m.priceJpy);
+    s.total += 1;
+    if (!m.isAvailable) s.booked += 1;
+  }
+
+  props = props.filter((p) => {
+    const s = statsMap.get(p.id);
+    if (!s || s.total === 0) return false;
+    const adr = avg(s.prices);
+    if (filters.priceMin !== null && adr < filters.priceMin) return false;
+    if (filters.priceMax !== null && adr > filters.priceMax) return false;
+    return true;
+  });
+  const propIds = new Set(props.map((p) => p.id));
+
+  // ---- KPI ----
+  const adrs: number[] = [];
+  const occs: number[] = [];
+  const ppgs: number[] = [];
+  const rows: PropertyRow[] = [];
+  const scatter: ScatterPoint[] = [];
+
+  for (const p of props) {
+    const s = statsMap.get(p.id)!;
+    const adr = avg(s.prices);
+    const occ = s.total > 0 ? s.booked / s.total : 0;
+    adrs.push(adr);
+    occs.push(occ);
+    ppgs.push(adr / Math.max(p.maxGuests, 1));
+    rows.push({
+      id: p.id,
+      airroiId: p.airroiId,
+      title: p.title,
+      area: p.area,
+      propertyType: p.propertyType,
+      bedrooms: p.bedrooms,
+      maxGuests: p.maxGuests,
+      rating: p.rating,
+      reviewsCount: p.reviewsCount,
+      occupancyRate: Math.round(occ * 1000) / 10,
+      adr: Math.round(adr),
+      pricePerGuest: Math.round(adr / Math.max(p.maxGuests, 1)),
+      url: p.url,
+    });
+    scatter.push({
+      propertyId: p.id,
+      title: p.title,
+      area: p.area,
+      adr: Math.round(adr),
+      occupancyRate: Math.round(occ * 1000) / 10,
+      maxGuests: p.maxGuests,
+    });
+  }
+  rows.sort((a, b) => b.adr - a.adr);
+
+  // Lumina Fuji の散布図ポイント
+  const luminaAdr = luminaFiltered.length > 0 ? avg(luminaFiltered.map((m) => m.configuredPrice)) : null;
+  const luminaOcc =
+    luminaFiltered.length > 0
+      ? luminaFiltered.filter((m) => m.isBooked).length / luminaFiltered.length
+      : null;
+  if (luminaAdr !== null && luminaOcc !== null) {
+    scatter.push({
+      propertyId: "lumina",
+      title: LUMINA_PROFILE.title,
+      area: LUMINA_PROFILE.area,
+      adr: Math.round(luminaAdr),
+      occupancyRate: Math.round(luminaOcc * 1000) / 10,
+      maxGuests: LUMINA_PROFILE.maxGuests,
+      isLumina: true,
+    });
+  }
+
+  // Pacing KPI (今後30/60日、物件フィルタのみ適用)
+  const pacing30End = toDateStr(addDays(today, 29));
+  const pacingOf = (metrics: DailyMetric[], endDate: string) => {
+    const target = metrics.filter((m) => propIds.has(m.propertyId) && m.targetDate <= endDate);
+    if (target.length === 0) return 0;
+    return target.filter((m) => !m.isAvailable).length / target.length;
+  };
+
+  const kpis: Kpis = {
+    adr: Math.round(avg(adrs)),
+    occupancyRate: avg(occs),
+    revpar: Math.round(avg(adrs.map((a, i) => a * occs[i]))),
+    pacingOccupancy30: pacingOf(ds.pacingMetrics, pacing30End),
+    pacingOccupancy60: pacingOf(ds.pacingMetrics, pacingEnd),
+    pricePerGuest: Math.round(avg(ppgs)),
+    propertiesCount: props.length,
+    luminaAdr: luminaAdr !== null ? Math.round(luminaAdr) : null,
+    luminaOccupancy: luminaOcc,
+  };
+
+  // ---- 日別トレンド ----
+  const byDate = new Map<string, { prices: number[]; booked: number; total: number }>();
+  for (const m of dayFiltered) {
+    if (!propIds.has(m.propertyId)) continue;
+    let d = byDate.get(m.targetDate);
+    if (!d) {
+      d = { prices: [], booked: 0, total: 0 };
+      byDate.set(m.targetDate, d);
+    }
+    d.prices.push(m.priceJpy);
+    d.total += 1;
+    if (!m.isAvailable) d.booked += 1;
+  }
+  const luminaByDate = new Map(luminaFiltered.map((m) => [m.targetDate, m.configuredPrice]));
+  const trend: TrendPoint[] = [...byDate.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, d]) => ({
+      date,
+      avgPrice: Math.round(avg(d.prices)),
+      occupancyRate: d.total > 0 ? Math.round((d.booked / d.total) * 1000) / 10 : 0,
+      luminaPrice: luminaByDate.get(date) ?? null,
+    }));
+
+  // ---- 定員数別 単価分布 ----
+  const byBucket = new Map<string, { adrs: number[]; ppgs: number[] }>();
+  for (const p of props) {
+    const s = statsMap.get(p.id)!;
+    const adr = avg(s.prices);
+    const bucket = capacityBucketOf(p.maxGuests);
+    let b = byBucket.get(bucket);
+    if (!b) {
+      b = { adrs: [], ppgs: [] };
+      byBucket.set(bucket, b);
+    }
+    b.adrs.push(adr);
+    b.ppgs.push(adr / Math.max(p.maxGuests, 1));
+  }
+  const capacityBars: CapacityBar[] = CAPACITY_BUCKETS.filter((b) => byBucket.has(b.label)).map(
+    (b) => {
+      const d = byBucket.get(b.label)!;
+      return {
+        bucket: b.label,
+        avgAdr: Math.round(avg(d.adrs)),
+        avgPricePerGuest: Math.round(avg(d.ppgs)),
+        count: d.adrs.length,
+      };
+    },
+  );
+
+  // ---- ベンチマーク比較 (日別: エリア平均 / 上位20% / 下位20% / Lumina) ----
+  const benchmark: BenchmarkPoint[] = [...byDate.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, d]) => {
+      const sorted = [...d.prices].sort((x, y) => x - y);
+      return {
+        date,
+        areaAvg: Math.round(avg(sorted)),
+        top20: Math.round(percentile(sorted, 80)),
+        bottom20: Math.round(percentile(sorted, 20)),
+        lumina: luminaByDate.get(date) ?? null,
+      };
+    });
+
+  const periodLabel =
+    TIME_RANGES.find((t) => t.value === filters.timeRange)?.label ?? filters.timeRange;
+
+  return {
+    kpis,
+    scatter,
+    trend,
+    capacityBars,
+    benchmark,
+    rows,
+    dataSource: ds.dataSource,
+    periodLabel: `${periodLabel}: ${start} 〜 ${end}`,
+    lastSyncedAt: ds.lastSyncedAt,
+  };
+}
+
+export function parseFilters(params: Record<string, string | string[] | undefined>): Filters {
+  const get = (k: string) => {
+    const v = params[k];
+    return Array.isArray(v) ? v[0] : v;
+  };
+  const num = (k: string) => {
+    const v = get(k);
+    if (!v) return null;
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  const timeRange = TIME_RANGES.find((t) => t.value === get("range"))?.value ?? "past30";
+  const dayType = (["all", "weekday", "preholiday", "holiday"] as const).find(
+    (d) => d === get("dayType"),
+  ) ?? "all";
+  return {
+    area: get("area") ?? "all",
+    propertyType: get("type") ?? "all",
+    priceMin: num("priceMin"),
+    priceMax: num("priceMax"),
+    capacity: get("capacity") ?? "all",
+    bedrooms: get("bedrooms") ?? "all",
+    timeRange,
+    dayType,
+  };
+}

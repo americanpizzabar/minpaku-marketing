@@ -18,6 +18,7 @@ export async function GET(request: NextRequest) {
     const result = await runChunkedSync(
       "manual_refresh",
       request.nextUrl.searchParams.get("areas"),
+      request.nextUrl.searchParams.get("reset") === "1",
     );
     return NextResponse.json(result, { status: result.status === "FAILED" ? 500 : 200 });
   } catch (err) {

@@ -18,6 +18,7 @@ function cleanEnv(value: string | undefined): string | undefined {
 export async function runChunkedSync(
   syncType: "cron_daily" | "manual_refresh",
   areasParam?: string | null,
+  reset = false,
 ): Promise<SyncRunResult> {
   const db = getDb();
   if (!db) {
@@ -29,6 +30,13 @@ export async function runChunkedSync(
   }
 
   await ensureSchema(db);
+
+  if (reset) {
+    // 取り込み仕様の変更後などに、既存データを一掃してから再同期する
+    console.log("AirROI sync: reset指定のため daily_metrics と AirROI由来のpropertiesを削除します");
+    await db.execute("DELETE FROM daily_metrics");
+    await db.execute("DELETE FROM properties WHERE id LIKE 'airroi_%'");
+  }
 
   const requested = (areasParam ?? "")
     .split(",")

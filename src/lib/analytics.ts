@@ -76,14 +76,15 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
       s = { prices: [], booked: 0, total: 0 };
       statsMap.set(m.propertyId, s);
     }
-    s.prices.push(m.priceJpy);
+    // price_jpy=0 は価格情報なし (予約済み日はダミー価格のため保存していない)
+    if (m.priceJpy > 0) s.prices.push(m.priceJpy);
     s.total += 1;
     if (!m.isAvailable) s.booked += 1;
   }
 
   props = props.filter((p) => {
     const s = statsMap.get(p.id);
-    if (!s || s.total === 0) return false;
+    if (!s || s.total === 0 || s.prices.length === 0) return false;
     const adr = avg(s.prices);
     if (filters.priceMin !== null && adr < filters.priceMin) return false;
     if (filters.priceMax !== null && adr > filters.priceMax) return false;
@@ -178,12 +179,13 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
       d = { prices: [], booked: 0, total: 0 };
       byDate.set(m.targetDate, d);
     }
-    d.prices.push(m.priceJpy);
+    if (m.priceJpy > 0) d.prices.push(m.priceJpy);
     d.total += 1;
     if (!m.isAvailable) d.booked += 1;
   }
   const luminaByDate = new Map(luminaFiltered.map((m) => [m.targetDate, m.configuredPrice]));
   const trend: TrendPoint[] = [...byDate.entries()]
+    .filter(([, d]) => d.prices.length > 0)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([date, d]) => ({
       date,
@@ -220,6 +222,7 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
 
   // ---- ベンチマーク比較 (日別: エリア平均 / 上位20% / 下位20% / Lumina) ----
   const benchmark: BenchmarkPoint[] = [...byDate.entries()]
+    .filter(([, d]) => d.prices.length > 0)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([date, d]) => {
       const sorted = [...d.prices].sort((x, y) => x - y);
@@ -259,7 +262,8 @@ export function parseFilters(params: Record<string, string | string[] | undefine
     const n = Number(v);
     return Number.isFinite(n) && n > 0 ? n : null;
   };
-  const timeRange = TIME_RANGES.find((t) => t.value === get("range"))?.value ?? "past30";
+  // データソース (AirROI) は未来の料金カレンダーが主のため、デフォルトは今後30日
+  const timeRange = TIME_RANGES.find((t) => t.value === get("range"))?.value ?? "next30";
   const dayType = (["all", "weekday", "preholiday", "holiday"] as const).find(
     (d) => d === get("dayType"),
   ) ?? "all";

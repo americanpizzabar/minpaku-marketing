@@ -23,7 +23,7 @@ const AREA_SEARCH: Record<string, { lat: number; lng: number }> = {
 
 const RADIUS_MILES = Number(process.env.AIRROI_RADIUS_MILES ?? 3);
 // Pay-per-call コスト管理: 1エリアあたりのカレンダー取得件数上限
-const MAX_LISTINGS_PER_AREA = Number(process.env.AIRROI_MAX_LISTINGS_PER_AREA ?? 25);
+const MAX_LISTINGS_PER_AREA = Number(process.env.AIRROI_MAX_LISTINGS_PER_AREA ?? 100);
 const PAGE_SIZE = 10; // APIの上限
 
 export interface SyncResult {
@@ -198,13 +198,18 @@ export async function fetchAndStoreAirRoiData(db: Client, area: string): Promise
       apiCalls += 1;
 
       for (const day of ratesRes.rates ?? []) {
-        const price = num(day.rate);
-        if (!day.date || price === null || price <= 0) continue; // rate=0 は価格未設定日
+        if (!day.date) continue;
+        const rawPrice = num(day.rate);
+        const available = Boolean(day.available);
+        // 予約不可日の rate はAirbnbが返すダミー価格 (数百万円等) のため採用しない。
+        // 価格は「予約可能日の表示価格」のみ保存し、0 は価格情報なしを意味する。
+        const price = available && rawPrice !== null && rawPrice > 0 ? rawPrice : 0;
         stmts.push({
           sql: `INSERT INTO daily_metrics (property_id, target_date, price_jpy, price_per_person, is_available, min_nights, fetched_at)
                 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(property_id, target_date) DO UPDATE SET
-                  price_jpy=excluded.price_jpy, price_per_person=excluded.price_per_person,
+                  price_jpy=CASE WHEN excluded.price_jpy > 0 THEN excluded.price_jpy ELSE daily_metrics.price_jpy END,
+                  price_per_person=CASE WHEN excluded.price_jpy > 0 THEN excluded.price_per_person ELSE daily_metrics.price_per_person END,
                   is_available=excluded.is_available, min_nights=excluded.min_nights,
                   fetched_at=CURRENT_TIMESTAMP`,
           args: [
@@ -212,7 +217,7 @@ export async function fetchAndStoreAirRoiData(db: Client, area: string): Promise
             String(day.date).slice(0, 10),
             price,
             price / Math.max(maxGuests, 1),
-            day.available ? 1 : 0,
+            available ? 1 : 0,
             num(day.min_nights) ?? 1,
           ],
         });
@@ -226,7 +231,7 @@ export async function fetchAndStoreAirRoiData(db: Client, area: string): Promise
     recordsFetched += stmts.length;
   }
 
-  const CONCURRENCY = 5;
+  const CONCURRENCY = 10;
   for (let i = 0; i < targets.length; i += CONCURRENCY) {
     await Promise.all(targets.slice(i, i + CONCURRENCY).map(processListing));
   }

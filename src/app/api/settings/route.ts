@@ -40,6 +40,10 @@ export async function GET(request: NextRequest) {
       dailyRatesCalls: numParam("dailyRatesCalls", 0, 1000),
       luminaListingId: params.get("luminaListingId")?.replace(/\D/g, "") || undefined,
       luminaBasePrice: numParam("luminaBasePrice", 0, 10_000_000),
+      luminaBedrooms: numParam("luminaBedrooms", 1, 20),
+      luminaMaxGuests: numParam("luminaMaxGuests", 1, 50),
+      luminaOccupancy:
+        params.get("luminaOccupancy") === "none" ? null : numParam("luminaOccupancy", 0, 100),
     });
     if (params.get("luminaListingId") !== null || params.get("luminaBasePrice") !== null) {
       await db.execute("DELETE FROM sync_state WHERE key = 'lumina_rates_at'");

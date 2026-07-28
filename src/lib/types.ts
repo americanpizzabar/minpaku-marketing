@@ -40,24 +40,28 @@ export const CAPACITY_BUCKETS = [
 ] as const;
 
 export interface Filters {
-  area: string; // "all" or Area
+  areas: string[]; // 空配列 = 全エリア (複数選択可)
   propertyType: string; // "all" or PropertyType
   priceMin: number | null;
   priceMax: number | null;
   capacity: string; // "all" or bucket value
   bedrooms: string; // "all" | "1" | "2" | "3+"
   timeRange: TimeRange;
+  dateFrom: string | null; // YYYY-MM-DD。dateTo とセットで指定するとプリセット期間より優先
+  dateTo: string | null;
   dayType: DayType;
 }
 
 export const DEFAULT_FILTERS: Filters = {
-  area: "all",
+  areas: [],
   propertyType: "all",
   priceMin: null,
   priceMax: null,
   capacity: "all",
   bedrooms: "all",
-  timeRange: "past30",
+  timeRange: "next30",
+  dateFrom: null,
+  dateTo: null,
   dayType: "all",
 };
 
@@ -73,6 +77,7 @@ export interface Property {
   maxGuests: number;
   bedrooms: number;
   bathrooms: number | null;
+  areaSqm: number | null; // 部屋面積 (m²)
   rating: number | null;
   reviewsCount: number;
   url: string | null;
@@ -114,6 +119,7 @@ export interface ScatterPoint {
   adr: number;
   occupancyRate: number; // 0-100 (%)
   maxGuests: number;
+  url: string | null;
   isLumina?: boolean;
 }
 
@@ -153,6 +159,7 @@ export interface PropertyRow {
   adr: number;
   pricePerGuest: number;
   minNights: number; // 期間内で最も多い最低泊数
+  areaSqm: number | null; // 部屋面積 (m²)
   url: string | null;
 }
 

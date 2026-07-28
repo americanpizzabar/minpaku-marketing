@@ -116,6 +116,51 @@ export async function GET(request: NextRequest) {
   const id = request.nextUrl.searchParams.get("id") ?? "560510509533844467";
   const base = (process.env.AIRROI_API_BASE_URL ?? "https://api.airroi.com").replace(/\/$/, "");
 
+  // search=1: 半径検索レスポンスの全フィールド名を調査するモード (面積等の項目確認用)
+  if (request.nextUrl.searchParams.get("search") === "1") {
+    try {
+      const res = await fetch(`${base}/listings/search/radius`, {
+        method: "POST",
+        headers: {
+          "x-api-key": apiKey,
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          latitude: 35.4167,
+          longitude: 138.8667,
+          radius: 3,
+          pagination: { pageSize: 3, offset: 0 },
+        }),
+      });
+      const text = await res.text().catch(() => "");
+      if (!res.ok) {
+        return NextResponse.json({ mode: "search", status: res.status, body: text.slice(0, 500) });
+      }
+      const json = parseJsonSafe<{ results?: Record<string, unknown>[] }>(text);
+      const first = json.results?.[0] ?? {};
+      const flat: Record<string, unknown> = { ...first };
+      for (const v of Object.values(first)) {
+        if (typeof v === "object" && v !== null && !Array.isArray(v)) Object.assign(flat, v);
+      }
+      const sizeFields = Object.fromEntries(
+        Object.entries(flat).filter(([k]) => /sq|size|area|m2|meter|feet/i.test(k)),
+      );
+      return NextResponse.json({
+        mode: "search",
+        status: res.status,
+        topLevelKeys: Object.keys(first),
+        flatKeys: Object.keys(flat),
+        sizeFields,
+      });
+    } catch (err) {
+      return NextResponse.json({
+        mode: "search",
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   const variants = [`/listings/future/rates?id=${id}&currency=native`];
 
   const results: Record<string, unknown>[] = [];

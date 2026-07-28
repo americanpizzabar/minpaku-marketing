@@ -77,19 +77,30 @@ export default function Sidebar({ dataSource }: { dataSource: "turso" | "demo" }
       </div>
 
       <div>
-        <label className={labelClass}>エリア</label>
-        <select
-          className={selectClass}
-          value={get("area")}
-          onChange={(e) => setParam("area", e.target.value)}
-        >
-          <option value="all">全エリア</option>
-          {AREAS.map((a) => (
-            <option key={a} value={a}>
-              {a}
-            </option>
-          ))}
-        </select>
+        <label className={labelClass}>エリア (複数選択可)</label>
+        <div className="flex flex-col gap-1 rounded-lg border border-slate-300 bg-white p-2">
+          {AREAS.map((a) => {
+            const selected = (searchParams.get("area") ?? "").split(",").filter(Boolean);
+            const checked = selected.includes(a);
+            return (
+              <label key={a} className="flex items-center gap-2 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={(e) => {
+                    const next = e.target.checked
+                      ? [...selected, a]
+                      : selected.filter((s) => s !== a);
+                    setParam("area", next.join(","));
+                  }}
+                  className="h-4 w-4 accent-indigo-600"
+                />
+                {a}
+              </label>
+            );
+          })}
+          <p className="text-[11px] text-slate-400">未選択 = 全エリア</p>
+        </div>
       </div>
 
       <div>
@@ -109,11 +120,12 @@ export default function Sidebar({ dataSource }: { dataSource: "turso" | "demo" }
       </div>
 
       <div>
-        <label className={labelClass}>分析期間</label>
+        <label className={labelClass}>分析期間 (プリセット)</label>
         <select
           className={selectClass}
           value={get("range", "next30")}
           onChange={(e) => setParam("range", e.target.value)}
+          disabled={Boolean(searchParams.get("dateFrom") && searchParams.get("dateTo"))}
         >
           {TIME_RANGES.map((t) => (
             <option key={t.value} value={t.value}>
@@ -121,6 +133,39 @@ export default function Sidebar({ dataSource }: { dataSource: "turso" | "demo" }
             </option>
           ))}
         </select>
+      </div>
+
+      <div>
+        <label className={labelClass}>日付範囲を直接指定 (プリセットより優先)</label>
+        <div className="flex flex-col gap-1.5">
+          <input
+            type="date"
+            value={searchParams.get("dateFrom") ?? ""}
+            onChange={(e) => setParam("dateFrom", e.target.value)}
+            className={selectClass}
+          />
+          <input
+            type="date"
+            value={searchParams.get("dateTo") ?? ""}
+            onChange={(e) => setParam("dateTo", e.target.value)}
+            className={selectClass}
+          />
+          {(searchParams.get("dateFrom") || searchParams.get("dateTo")) && (
+            <button
+              onClick={() => {
+                const params = new URLSearchParams(searchParams.toString());
+                params.delete("dateFrom");
+                params.delete("dateTo");
+                startTransition(() => {
+                  router.push(`${pathname}?${params.toString()}`);
+                });
+              }}
+              className="self-start text-xs font-medium text-indigo-600 hover:underline"
+            >
+              日付指定をクリア
+            </button>
+          )}
+        </div>
       </div>
 
       <div>

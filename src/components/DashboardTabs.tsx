@@ -31,8 +31,60 @@ const yen = (v: number) => `¥${Math.round(v).toLocaleString("ja-JP")}`;
 function ScatterTab({ data }: { data: ScatterPoint[] }) {
   const competitors = data.filter((d) => !d.isLumina);
   const lumina = data.filter((d) => d.isLumina);
+  const [selected, setSelected] = useState<ScatterPoint | null>(null);
+
+  // 1回目のタップで物件を選択して詳細+リンクを表示、同じ点をもう一度タップするとリンクを開く
+  const handlePointClick = (raw: unknown) => {
+    const d = raw as { payload?: ScatterPoint } | ScatterPoint | undefined;
+    const p = d && "payload" in (d as object) && (d as { payload?: ScatterPoint }).payload
+      ? (d as { payload: ScatterPoint }).payload
+      : (d as ScatterPoint | undefined);
+    if (!p?.propertyId) return;
+    if (selected?.propertyId === p.propertyId) {
+      if (p.url) window.open(p.url, "_blank", "noopener,noreferrer");
+    } else {
+      setSelected(p);
+    }
+  };
+
   return (
-    <ResponsiveContainer width="100%" height={420}>
+    <div>
+      {selected && (
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs">
+          <div className="min-w-0">
+            <p className="truncate font-semibold text-slate-800">
+              {selected.isLumina ? "★ " : ""}
+              {selected.title}
+            </p>
+            <p className="text-slate-500">
+              {selected.area} / 定員{selected.maxGuests}名 / ADR {yen(selected.adr)} / 稼働率{" "}
+              {selected.occupancyRate}%
+            </p>
+          </div>
+          <div className="flex shrink-0 items-center gap-3">
+            {selected.url ? (
+              <a
+                href={selected.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="rounded-lg bg-indigo-600 px-3 py-1.5 font-semibold text-white transition hover:bg-indigo-700"
+              >
+                Airbnbで開く ↗
+              </a>
+            ) : (
+              <span className="text-slate-400">リンクなし</span>
+            )}
+            <button
+              onClick={() => setSelected(null)}
+              className="text-slate-400 hover:text-slate-600"
+              aria-label="選択を解除"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
+      <ResponsiveContainer width="100%" height={selected ? 380 : 420}>
       <ScatterChart margin={{ top: 16, right: 24, bottom: 8, left: 8 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
         <XAxis
@@ -75,10 +127,28 @@ function ScatterTab({ data }: { data: ScatterPoint[] }) {
           }}
         />
         <Legend />
-        <Scatter name="競合物件" data={competitors} fill="#6366f1" fillOpacity={0.55} />
-        <Scatter name="Lumina Fuji" data={lumina} fill="#f43f5e" shape="star" />
+        <Scatter
+          name="競合物件"
+          data={competitors}
+          fill="#6366f1"
+          fillOpacity={0.55}
+          onClick={handlePointClick}
+          cursor="pointer"
+        />
+        <Scatter
+          name="Lumina Fuji"
+          data={lumina}
+          fill="#f43f5e"
+          shape="star"
+          onClick={handlePointClick}
+          cursor="pointer"
+        />
       </ScatterChart>
-    </ResponsiveContainer>
+      </ResponsiveContainer>
+      <p className="mt-1 text-center text-[11px] text-slate-400">
+        点をタップで物件を選択、もう一度タップでAirbnbのページを開きます
+      </p>
+    </div>
   );
 }
 

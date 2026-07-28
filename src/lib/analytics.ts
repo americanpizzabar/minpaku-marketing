@@ -2,6 +2,7 @@ import { loadDataset } from "./data";
 import { matchesDayType, rangeForTimeRange, todayJst, toDateStr, addDays } from "./dates";
 import { LUMINA_PROFILE } from "./demo-data";
 import {
+  AREAS,
   CAPACITY_BUCKETS,
   TIME_RANGES,
   type BenchmarkPoint,
@@ -28,7 +29,7 @@ function percentile(sorted: number[], p: number): number {
 }
 
 function matchesFilters(p: Property, f: Filters): boolean {
-  if (f.area !== "all" && p.area !== f.area) return false;
+  if (f.areas.length > 0 && !f.areas.includes(p.area)) return false;
   if (f.propertyType !== "all" && p.propertyType !== f.propertyType) return false;
   if (f.capacity !== "all") {
     const bucket = CAPACITY_BUCKETS.find((b) => b.value === f.capacity);
@@ -67,7 +68,15 @@ function modeOf(counts: Map<number, number>): number {
 }
 
 export async function getDashboardData(filters: Filters): Promise<DashboardData> {
-  const { start, end } = rangeForTimeRange(filters.timeRange);
+  // 日付範囲の直接指定があればプリセット期間より優先する
+  const custom = filters.dateFrom !== null && filters.dateTo !== null;
+  const preset = rangeForTimeRange(filters.timeRange);
+  const start = custom
+    ? (filters.dateFrom! <= filters.dateTo! ? filters.dateFrom! : filters.dateTo!)
+    : preset.start;
+  const end = custom
+    ? (filters.dateFrom! <= filters.dateTo! ? filters.dateTo! : filters.dateFrom!)
+    : preset.end;
   const today = todayJst();
   const pacingStart = toDateStr(today);
   const pacingEnd = toDateStr(addDays(today, 59));
@@ -135,6 +144,7 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
       adr: Math.round(adr),
       pricePerGuest: Math.round(adr / Math.max(p.maxGuests, 1)),
       minNights: modeOf(s.minNightsCount),
+      areaSqm: p.areaSqm,
       url: p.url,
     });
     scatter.push({
@@ -144,6 +154,7 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
       adr: Math.round(adr),
       occupancyRate: Math.round(occ * 1000) / 10,
       maxGuests: p.maxGuests,
+      url: p.url,
     });
   }
   rows.sort((a, b) => b.adr - a.adr);
@@ -167,6 +178,7 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
       adr: Math.round(luminaAdr),
       occupancyRate: Math.round(luminaOcc * 1000) / 10,
       maxGuests: lp.maxGuests,
+      url: lp.listingId ? `https://www.airbnb.jp/rooms/${lp.listingId}` : null,
       isLumina: true,
     });
   }
@@ -256,8 +268,9 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
       };
     });
 
-  const periodLabel =
-    TIME_RANGES.find((t) => t.value === filters.timeRange)?.label ?? filters.timeRange;
+  const periodLabel = custom
+    ? "指定期間"
+    : (TIME_RANGES.find((t) => t.value === filters.timeRange)?.label ?? filters.timeRange);
 
   return {
     kpis,
@@ -288,14 +301,24 @@ export function parseFilters(params: Record<string, string | string[] | undefine
   const dayType = (["all", "weekday", "preholiday", "holiday"] as const).find(
     (d) => d === get("dayType"),
   ) ?? "all";
+  const date = (k: string) => {
+    const v = get(k);
+    return v && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
+  };
+  const areas = (get("area") ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((a) => (AREAS as readonly string[]).includes(a));
   return {
-    area: get("area") ?? "all",
+    areas,
     propertyType: get("type") ?? "all",
     priceMin: num("priceMin"),
     priceMax: num("priceMax"),
     capacity: get("capacity") ?? "all",
     bedrooms: get("bedrooms") ?? "all",
     timeRange,
+    dateFrom: date("dateFrom"),
+    dateTo: date("dateTo"),
     dayType,
   };
 }

@@ -240,12 +240,21 @@ async function refreshAreaCatalog(
     const airroiId = String(rawId);
     const maxGuests =
       num(pick(item, ["person_capacity", "accommodates", "max_guests", "guests", "guest_limit", "capacity"])) ?? 1;
+    // 部屋面積: m²系のフィールドを優先し、平方フィートしか無ければ換算する
+    let areaSqm = num(
+      pick(item, ["area_sqm", "square_meters", "sqm", "m2", "listing_size_sqm", "unit_size"]),
+    );
+    if (areaSqm === null) {
+      const sqft = num(pick(item, ["square_feet", "sq_ft", "sqft", "listing_size"]));
+      if (sqft !== null && sqft > 0) areaSqm = Math.round(sqft * 0.092903 * 10) / 10;
+    }
     stmts.push({
-      sql: `INSERT INTO properties (id, airroi_id, airbnb_id, title, area, latitude, longitude, property_type, max_guests, bedrooms, bathrooms, rating, reviews_count, url, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      sql: `INSERT INTO properties (id, airroi_id, airbnb_id, title, area, latitude, longitude, property_type, max_guests, bedrooms, bathrooms, area_sqm, rating, reviews_count, url, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(id) DO UPDATE SET
               title=excluded.title, rating=excluded.rating, reviews_count=excluded.reviews_count,
               max_guests=excluded.max_guests, bedrooms=excluded.bedrooms,
+              area_sqm=COALESCE(excluded.area_sqm, properties.area_sqm),
               updated_at=CURRENT_TIMESTAMP`,
       args: [
         `airroi_${airroiId}`,
@@ -259,6 +268,7 @@ async function refreshAreaCatalog(
         maxGuests,
         num(pick(item, ["bedrooms", "bedroom_count"])) ?? 1,
         num(pick(item, ["bathrooms", "bathroom_count"])),
+        areaSqm,
         num(pick(item, ["rating", "overall_rating", "review_score", "guest_satisfaction"])),
         num(pick(item, ["reviews_count", "number_of_reviews", "visible_review_count", "review_count"])) ?? 0,
         `https://www.airbnb.com/rooms/${airroiId}`,

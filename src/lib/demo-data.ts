@@ -64,6 +64,7 @@ export function generateDemoProperties(count = 72): Property[] {
       maxGuests,
       bedrooms,
       bathrooms: 1 + Math.floor(rand() * 2),
+      areaSqm: Math.round(25 + maxGuests * 10 + rand() * 40),
       rating: Math.round((4.2 + rand() * 0.75) * 100) / 100,
       reviewsCount: Math.floor(rand() * 280),
       url: `https://www.airbnb.jp/rooms/${50000000 + i * 7}`,

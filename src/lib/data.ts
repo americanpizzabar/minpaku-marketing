@@ -12,6 +12,7 @@ export interface LuminaProfile {
   bedrooms: number;
   occupancyOverride: number | null; // %表記。API未収録時に設定画面の値を使用
   source: "api" | "manual" | "demo"; // luminaメトリクスの出所
+  listingId: string | null; // 自物件のAirbnbリスティングID (リンク表示用)
 }
 
 export interface Dataset {
@@ -74,6 +75,7 @@ export async function loadDataset(
       bedrooms: LUMINA_PROFILE.bedrooms,
       occupancyOverride: null,
       source: "demo",
+      listingId: null,
     },
     dataSource: "demo",
     lastSyncedAt: null,
@@ -148,6 +150,7 @@ async function loadFromTurso(
       maxGuests: Number(r.max_guests),
       bedrooms: Number(r.bedrooms ?? 1),
       bathrooms: r.bathrooms !== null ? Number(r.bathrooms) : null,
+      areaSqm: r.area_sqm !== null && r.area_sqm !== undefined ? Number(r.area_sqm) : null,
       rating: r.rating !== null ? Number(r.rating) : null,
       reviewsCount: Number(r.reviews_count ?? 0),
       url: r.url ? String(r.url) : null,
@@ -165,6 +168,7 @@ async function loadFromTurso(
       bedrooms: cfgNum("config:lumina_bedrooms") ?? LUMINA_PROFILE.bedrooms,
       occupancyOverride: cfgNum("config:lumina_occupancy"),
       source: luminaSource === "api" ? "api" : "manual",
+      listingId: luminaCfg.get("config:lumina_listing_id") || null,
     },
     dataSource: "turso",
     lastSyncedAt: syncRes.rows[0] ? String(syncRes.rows[0].created_at) : null,

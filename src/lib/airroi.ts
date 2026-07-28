@@ -267,10 +267,10 @@ async function refreshAreaCatalog(
         mapPropertyType(pick(item, ["listing_type", "property_type", "room_type"])),
         maxGuests,
         num(pick(item, ["bedrooms", "bedroom_count"])) ?? 1,
-        num(pick(item, ["bathrooms", "bathroom_count"])),
+        num(pick(item, ["baths", "bathrooms", "bathroom_count"])),
         areaSqm,
-        num(pick(item, ["rating", "overall_rating", "review_score", "guest_satisfaction"])),
-        num(pick(item, ["reviews_count", "number_of_reviews", "visible_review_count", "review_count"])) ?? 0,
+        num(pick(item, ["rating_overall", "rating", "overall_rating", "review_score"])),
+        num(pick(item, ["num_reviews", "reviews_count", "number_of_reviews", "review_count"])) ?? 0,
         `https://www.airbnb.com/rooms/${airroiId}`,
       ],
     });

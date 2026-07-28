@@ -1,5 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSyncConfig, saveSyncConfig, COST_PER_RATES_CALL, COST_PER_SEARCH_CALL, ALL_AREAS } from "@/lib/airroi";
+import {
+  getSyncConfig,
+  refreshLuminaRates,
+  saveSyncConfig,
+  COST_PER_RATES_CALL,
+  COST_PER_SEARCH_CALL,
+  ALL_AREAS,
+} from "@/lib/airroi";
 import { ensureSchema, getDb } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
@@ -87,6 +94,8 @@ export async function POST(request: NextRequest) {
       ? body.luminaListingId.trim().replace(/\D/g, "")
       : undefined;
 
+  const prevConfig = await getSyncConfig(db);
+
   await saveSyncConfig(db, {
     autoSync: typeof body.autoSync === "boolean" ? body.autoSync : undefined,
     ratesRefreshDays: numField(body.ratesRefreshDays, 1, 90),
@@ -94,14 +103,30 @@ export async function POST(request: NextRequest) {
     dailyRatesCalls: numField(body.dailyRatesCalls, 0, 1000),
     luminaListingId,
     luminaBasePrice: numField(body.luminaBasePrice, 0, 10_000_000),
+    luminaBedrooms: numField(body.luminaBedrooms, 1, 20),
+    luminaMaxGuests: numField(body.luminaMaxGuests, 1, 50),
+    luminaOccupancy:
+      "luminaOccupancy" in body
+        ? body.luminaOccupancy === null || body.luminaOccupancy === ""
+          ? null
+          : numField(body.luminaOccupancy, 0, 100)
+        : undefined,
   });
 
-  // 自物件の設定が変わったら次回同期で即時反映されるよう鮮度をリセットする
-  if (luminaListingId !== undefined || body.luminaBasePrice !== undefined) {
-    await db.execute("DELETE FROM sync_state WHERE key = 'lumina_rates_at'");
-  }
-
   const config = await getSyncConfig(db);
+
+  // リスティングID・基準価格が変わった場合はその場でベンチマークを再生成し、
+  // 保存直後のページ再読み込みでグラフに即時反映されるようにする
+  if (
+    config.luminaListingId !== prevConfig.luminaListingId ||
+    config.luminaBasePrice !== prevConfig.luminaBasePrice
+  ) {
+    try {
+      await refreshLuminaRates(db, config);
+    } catch (err) {
+      console.error("設定保存後のLuminaベンチマーク再生成に失敗:", err);
+    }
+  }
   const countRes = await db.execute(
     "SELECT COUNT(*) AS c FROM properties WHERE id LIKE 'airroi_%'",
   );

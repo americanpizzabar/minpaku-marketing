@@ -42,6 +42,9 @@ export interface SyncConfig {
   dailyRatesCalls: number; // 0 = 自動同期での料金取得なし
   luminaListingId: string; // 自物件 (ベンチマーク対象) のAirbnbリスティングID
   luminaBasePrice: number; // 自物件がAirROI未収録の場合に使う基準価格 (円/泊, 0=未設定)
+  luminaBedrooms: number; // 自物件の寝室数 (API未収録時の表示用)
+  luminaMaxGuests: number; // 自物件の定員 (API未収録時の表示用)
+  luminaOccupancy: number | null; // 自物件の稼働率 (%表記, API未収録時に使用, null=未設定)
 }
 
 /** Webアプリの設定画面で保存された値 (sync_state) を環境変数既定値とマージして返す */
@@ -61,6 +64,14 @@ export async function getSyncConfig(db: Client): Promise<SyncConfig> {
     dailyRatesCalls: numOr("config:daily_rates_calls", DEFAULT_DAILY_RATES_CALLS),
     luminaListingId: map.get("config:lumina_listing_id")?.trim() || DEFAULT_LUMINA_LISTING_ID,
     luminaBasePrice: numOr("config:lumina_base_price", Number(process.env.LUMINA_BASE_PRICE ?? 0)),
+    luminaBedrooms: numOr("config:lumina_bedrooms", 4),
+    luminaMaxGuests: numOr("config:lumina_max_guests", 10),
+    luminaOccupancy: (() => {
+      const v = map.get("config:lumina_occupancy");
+      if (v === undefined || v === "") return null;
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 0 && n <= 100 ? n : null;
+    })(),
   };
 }
 
@@ -77,6 +88,12 @@ export async function saveSyncConfig(db: Client, config: Partial<SyncConfig>): P
     entries.push(["config:lumina_listing_id", config.luminaListingId.trim()]);
   if (config.luminaBasePrice !== undefined)
     entries.push(["config:lumina_base_price", String(config.luminaBasePrice)]);
+  if (config.luminaBedrooms !== undefined)
+    entries.push(["config:lumina_bedrooms", String(config.luminaBedrooms)]);
+  if (config.luminaMaxGuests !== undefined)
+    entries.push(["config:lumina_max_guests", String(config.luminaMaxGuests)]);
+  if (config.luminaOccupancy !== undefined)
+    entries.push(["config:lumina_occupancy", config.luminaOccupancy === null ? "" : String(config.luminaOccupancy)]);
   for (const [key, value] of entries) {
     await db.execute({
       sql: `INSERT INTO sync_state (key, value) VALUES (?, ?)
@@ -329,12 +346,13 @@ export interface SyncStepResult {
  * AirROI未収録 (404) の場合は、設定された基準価格で今後365日を埋める
  * (実データが取れるようになれば自動的に上書きされる)。
  */
-async function refreshLuminaRates(
+export async function refreshLuminaRates(
   db: Client,
   config: SyncConfig,
 ): Promise<{ records: number; usedApi: boolean }> {
   const stmts: InStatement[] = [];
   let usedApi = false;
+  let source = "api";
 
   try {
     const ratesRes = await airRoiGet<FutureRatesResponse>(
@@ -357,6 +375,7 @@ async function refreshLuminaRates(
     }
   } catch (err) {
     usedApi = true; // 404でもコールは消費されている
+    source = "manual";
     console.error(`AirROI: Lumina Fuji (${config.luminaListingId}) の料金取得に失敗:`, err);
     if (config.luminaBasePrice > 0) {
       // フォールバック: 基準価格で今後365日を埋める (実データ由来の価格は上書きしない)
@@ -380,8 +399,14 @@ async function refreshLuminaRates(
           ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
     args: [],
   });
+  // データの出所 (api=実データ / manual=基準価格フォールバック) を分析側へ伝える
+  stmts.push({
+    sql: `INSERT INTO sync_state (key, value) VALUES ('lumina_source', ?)
+          ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+    args: [source],
+  });
   await db.batch(stmts, "write");
-  return { records: stmts.length - 1, usedApi };
+  return { records: stmts.length - 2, usedApi };
 }
 
 /**

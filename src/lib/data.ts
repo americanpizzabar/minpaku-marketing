@@ -1,16 +1,25 @@
 import { ensureSchema, getDb, isDbConfigured } from "./db";
 import {
+  LUMINA_PROFILE,
   generateDemoLuminaMetrics,
   generateDemoMetrics,
   generateDemoProperties,
 } from "./demo-data";
 import type { DailyMetric, LuminaMetric, Property, PropertyType } from "./types";
 
+export interface LuminaProfile {
+  maxGuests: number;
+  bedrooms: number;
+  occupancyOverride: number | null; // %表記。API未収録時に設定画面の値を使用
+  source: "api" | "manual" | "demo"; // luminaメトリクスの出所
+}
+
 export interface Dataset {
   properties: Property[];
   metrics: DailyMetric[]; // 指定期間内のみ
   lumina: LuminaMetric[]; // 指定期間内のみ
   pacingMetrics: DailyMetric[]; // 今後60日 (Pacing KPI用、フィルタ済み物件のみで別途絞り込み)
+  luminaProfile: LuminaProfile;
   dataSource: "turso" | "demo";
   lastSyncedAt: string | null;
 }
@@ -60,6 +69,12 @@ export async function loadDataset(
     metrics: demo.metrics.filter((m) => inRange(m.targetDate, start, end)),
     lumina: demo.lumina.filter((m) => inRange(m.targetDate, start, end)),
     pacingMetrics: demo.metrics.filter((m) => inRange(m.targetDate, pacingStart, pacingEnd)),
+    luminaProfile: {
+      maxGuests: LUMINA_PROFILE.maxGuests,
+      bedrooms: LUMINA_PROFILE.bedrooms,
+      occupancyOverride: null,
+      source: "demo",
+    },
     dataSource: "demo",
     lastSyncedAt: null,
   };
@@ -79,7 +94,7 @@ async function loadFromTurso(
   if (!schemaReady) schemaReady = ensureSchema(db);
   await schemaReady;
 
-  const [propsRes, metricsRes, luminaRes, pacingRes, syncRes] = await Promise.all([
+  const [propsRes, metricsRes, luminaRes, pacingRes, syncRes, luminaCfgRes] = await Promise.all([
     db.execute("SELECT * FROM properties"),
     db.execute({
       sql: "SELECT property_id, target_date, price_jpy, is_available, min_nights FROM daily_metrics WHERE target_date BETWEEN ? AND ?",
@@ -96,7 +111,21 @@ async function loadFromTurso(
     db.execute(
       "SELECT created_at FROM sync_logs WHERE status = 'SUCCESS' ORDER BY created_at DESC LIMIT 1",
     ),
+    db.execute(
+      "SELECT key, value FROM sync_state WHERE key LIKE 'config:lumina%' OR key = 'lumina_source'",
+    ),
   ]);
+
+  const luminaCfg = new Map(
+    luminaCfgRes.rows.map((r) => [String(r.key), String(r.value ?? "")]),
+  );
+  const cfgNum = (key: string): number | null => {
+    const v = luminaCfg.get(key);
+    if (v === undefined || v === "") return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const luminaSource = luminaCfg.get("lumina_source");
 
   const toMetric = (r: Record<string, unknown>): DailyMetric => ({
     propertyId: String(r.property_id),
@@ -131,6 +160,12 @@ async function loadFromTurso(
       actualRevenue: Number(r.actual_revenue ?? 0),
     })),
     pacingMetrics: pacingRes.rows.map((r) => toMetric(r as Record<string, unknown>)),
+    luminaProfile: {
+      maxGuests: cfgNum("config:lumina_max_guests") ?? LUMINA_PROFILE.maxGuests,
+      bedrooms: cfgNum("config:lumina_bedrooms") ?? LUMINA_PROFILE.bedrooms,
+      occupancyOverride: cfgNum("config:lumina_occupancy"),
+      source: luminaSource === "api" ? "api" : "manual",
+    },
     dataSource: "turso",
     lastSyncedAt: syncRes.rows[0] ? String(syncRes.rows[0].created_at) : null,
   };

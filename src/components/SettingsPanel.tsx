@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 interface SettingsState {
@@ -9,6 +10,26 @@ interface SettingsState {
   dailyRatesCalls: number;
   luminaListingId: string;
   luminaBasePrice: number;
+  luminaBedrooms: number;
+  luminaMaxGuests: number;
+  luminaOccupancy: number | ""; // "" = 未設定
+}
+
+function toFormState(config: Record<string, unknown>): SettingsState {
+  return {
+    autoSync: Boolean(config.autoSync),
+    ratesRefreshDays: Number(config.ratesRefreshDays),
+    searchRefreshDays: Number(config.searchRefreshDays),
+    dailyRatesCalls: Number(config.dailyRatesCalls),
+    luminaListingId: String(config.luminaListingId ?? ""),
+    luminaBasePrice: Number(config.luminaBasePrice ?? 0),
+    luminaBedrooms: Number(config.luminaBedrooms ?? 4),
+    luminaMaxGuests: Number(config.luminaMaxGuests ?? 10),
+    luminaOccupancy:
+      config.luminaOccupancy === null || config.luminaOccupancy === undefined
+        ? ""
+        : Number(config.luminaOccupancy),
+  };
 }
 
 const inputClass =
@@ -17,6 +38,7 @@ const labelClass = "mb-1 block text-xs font-semibold text-slate-500";
 
 /** データ取得 (自動/手動・更新周期・コスト上限・自物件ID) の設定パネル */
 export default function SettingsPanel() {
+  const router = useRouter();
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -36,14 +58,7 @@ export default function SettingsPanel() {
           setConfigured(false);
           return;
         }
-        setForm({
-          autoSync: json.config.autoSync,
-          ratesRefreshDays: json.config.ratesRefreshDays,
-          searchRefreshDays: json.config.searchRefreshDays,
-          dailyRatesCalls: json.config.dailyRatesCalls,
-          luminaListingId: json.config.luminaListingId,
-          luminaBasePrice: json.config.luminaBasePrice,
-        });
+        setForm(toFormState(json.config));
         setTracked(json.trackedProperties);
         setMonthlyCost(json.estimatedMonthlyCostUsd);
       })
@@ -59,20 +74,18 @@ export default function SettingsPanel() {
       const res = await fetch("/api/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
+        body: JSON.stringify({
+          ...form,
+          luminaOccupancy: form.luminaOccupancy === "" ? null : form.luminaOccupancy,
+        }),
       });
       const json = await res.json();
       if (json.saved) {
-        setForm({
-          autoSync: json.config.autoSync,
-          ratesRefreshDays: json.config.ratesRefreshDays,
-          searchRefreshDays: json.config.searchRefreshDays,
-          dailyRatesCalls: json.config.dailyRatesCalls,
-          luminaListingId: json.config.luminaListingId,
-          luminaBasePrice: json.config.luminaBasePrice,
-        });
+        setForm(toFormState(json.config));
         setMonthlyCost(json.estimatedMonthlyCostUsd);
-        setMessage("設定を保存しました (自物件の変更は次回の同期で反映されます)");
+        setMessage("設定を保存し、グラフに反映しました");
+        // サーバーコンポーネントを再取得してKPI・グラフを即時更新する
+        router.refresh();
       } else {
         setMessage(json.error ?? "保存に失敗しました");
       }
@@ -163,20 +176,69 @@ export default function SettingsPanel() {
                 />
               </div>
 
-              <div>
-                <label className={labelClass}>自物件の基準価格 (円/泊)</label>
-                <input
-                  type="number"
-                  className={inputClass}
-                  value={form.luminaBasePrice || ""}
-                  onChange={(e) =>
-                    setForm({ ...form, luminaBasePrice: Number(e.target.value) || 0 })
-                  }
-                  placeholder="例: 78000"
-                />
-                <p className="mt-1 text-[11px] text-slate-400">
-                  AirROIに自物件が未収録の間、この価格でベンチマーク線を表示します
+              <div className="rounded-lg bg-slate-50 p-2.5">
+                <p className="mb-2 text-[11px] font-semibold text-slate-500">
+                  自物件情報 (AirROI未収録の間はこの値でベンチマークを表示)
                 </p>
+                <div className="flex flex-col gap-2.5">
+                  <div>
+                    <label className={labelClass}>基準価格 (円/泊)</label>
+                    <input
+                      type="number"
+                      className={inputClass}
+                      value={form.luminaBasePrice || ""}
+                      onChange={(e) =>
+                        setForm({ ...form, luminaBasePrice: Number(e.target.value) || 0 })
+                      }
+                      placeholder="例: 78000"
+                    />
+                  </div>
+                  <div className="flex gap-2">
+                    <div className="flex-1">
+                      <label className={labelClass}>寝室数</label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={20}
+                        className={inputClass}
+                        value={form.luminaBedrooms || ""}
+                        onChange={(e) =>
+                          setForm({ ...form, luminaBedrooms: Number(e.target.value) || 1 })
+                        }
+                      />
+                    </div>
+                    <div className="flex-1">
+                      <label className={labelClass}>定員 (人)</label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={50}
+                        className={inputClass}
+                        value={form.luminaMaxGuests || ""}
+                        onChange={(e) =>
+                          setForm({ ...form, luminaMaxGuests: Number(e.target.value) || 1 })
+                        }
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className={labelClass}>稼働率 (%)</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      className={inputClass}
+                      value={form.luminaOccupancy}
+                      onChange={(e) =>
+                        setForm({
+                          ...form,
+                          luminaOccupancy: e.target.value === "" ? "" : Number(e.target.value),
+                        })
+                      }
+                      placeholder="例: 65 (空欄=未設定)"
+                    />
+                  </div>
+                </div>
               </div>
 
               <p className="text-xs text-slate-500">

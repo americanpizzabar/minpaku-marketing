@@ -149,11 +149,16 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
   rows.sort((a, b) => b.adr - a.adr);
 
   // Lumina Fuji の散布図ポイント
-  const luminaAdr = luminaFiltered.length > 0 ? avg(luminaFiltered.map((m) => m.configuredPrice)) : null;
+  const lp = ds.luminaProfile;
+  const luminaPrices = luminaFiltered.map((m) => m.configuredPrice).filter((p) => p > 0);
+  const luminaAdr = luminaPrices.length > 0 ? avg(luminaPrices) : null;
+  // API実データがある場合は予約状況から算出、未収録時は設定画面で入力された稼働率を使う
   const luminaOcc =
-    luminaFiltered.length > 0
-      ? luminaFiltered.filter((m) => m.isBooked).length / luminaFiltered.length
-      : null;
+    lp.source !== "api" && lp.occupancyOverride !== null
+      ? lp.occupancyOverride / 100
+      : luminaFiltered.length > 0
+        ? luminaFiltered.filter((m) => m.isBooked).length / luminaFiltered.length
+        : null;
   if (luminaAdr !== null && luminaOcc !== null) {
     scatter.push({
       propertyId: "lumina",
@@ -161,7 +166,7 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
       area: LUMINA_PROFILE.area,
       adr: Math.round(luminaAdr),
       occupancyRate: Math.round(luminaOcc * 1000) / 10,
-      maxGuests: LUMINA_PROFILE.maxGuests,
+      maxGuests: lp.maxGuests,
       isLumina: true,
     });
   }

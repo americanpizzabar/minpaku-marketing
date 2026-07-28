@@ -63,6 +63,37 @@ function summarize(days: RateDay[]) {
         .filter((n) => Number.isFinite(n) && n > 0);
       return r.length ? Math.round(r.reduce((a, b) => a + b, 0) / r.length) : null;
     })(),
+    // 最低泊数ごとの平均レート (rateが泊数分の合計になっていないかの検証用)
+    byMinNights: (() => {
+      const groups = new Map<number, { count: number; sum: number; availCount: number; availSum: number }>();
+      for (const d of days) {
+        const mn = Number(d.min_nights) || 0;
+        const rate = Number(d.rate);
+        if (!Number.isFinite(rate) || rate <= 0) continue;
+        let g = groups.get(mn);
+        if (!g) {
+          g = { count: 0, sum: 0, availCount: 0, availSum: 0 };
+          groups.set(mn, g);
+        }
+        g.count += 1;
+        g.sum += rate;
+        if (d.available === true || d.available === 1) {
+          g.availCount += 1;
+          g.availSum += rate;
+        }
+      }
+      return Object.fromEntries(
+        [...groups.entries()].map(([mn, g]) => [
+          mn,
+          {
+            days: g.count,
+            avgRate: Math.round(g.sum / g.count),
+            availDays: g.availCount,
+            availAvgRate: g.availCount ? Math.round(g.availSum / g.availCount) : null,
+          },
+        ]),
+      );
+    })(),
     first5: days.slice(0, 5),
     highest3: [...days]
       .filter((d) => Number.isFinite(Number(d.rate)))
@@ -85,11 +116,7 @@ export async function GET(request: NextRequest) {
   const id = request.nextUrl.searchParams.get("id") ?? "560510509533844467";
   const base = (process.env.AIRROI_API_BASE_URL ?? "https://api.airroi.com").replace(/\/$/, "");
 
-  const variants = [
-    `/listings/future/rates?id=${id}&currency=native`,
-    `/listings/future/rates?id=${id}`,
-    `/listings/future/rates?id=${id}&currency=JPY`,
-  ];
+  const variants = [`/listings/future/rates?id=${id}&currency=native`];
 
   const results: Record<string, unknown>[] = [];
   for (const path of variants) {

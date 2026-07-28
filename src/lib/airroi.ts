@@ -29,10 +29,58 @@ const RADIUS_MILES = Number(process.env.AIRROI_RADIUS_MILES ?? 3);
 const MAX_LISTINGS_PER_AREA = Number(process.env.AIRROI_MAX_LISTINGS_PER_AREA ?? 100);
 const PAGE_SIZE = 10; // 検索APIの上限
 
-// コスト管理ノブ (すべて環境変数で調整可能)
-const SEARCH_REFRESH_DAYS = Number(process.env.AIRROI_SEARCH_REFRESH_DAYS ?? 30);
-const RATES_REFRESH_DAYS = Number(process.env.AIRROI_RATES_REFRESH_DAYS ?? 14);
-export const DAILY_RATES_CALLS = Number(process.env.AIRROI_DAILY_RATES_CALLS ?? 40);
+// コスト管理ノブの既定値 (環境変数 → Webアプリの設定画面 (sync_state) の順で上書き)
+const DEFAULT_SEARCH_REFRESH_DAYS = Number(process.env.AIRROI_SEARCH_REFRESH_DAYS ?? 30);
+const DEFAULT_RATES_REFRESH_DAYS = Number(process.env.AIRROI_RATES_REFRESH_DAYS ?? 14);
+const DEFAULT_DAILY_RATES_CALLS = Number(process.env.AIRROI_DAILY_RATES_CALLS ?? 40);
+const DEFAULT_LUMINA_LISTING_ID = cleanEnv(process.env.LUMINA_LISTING_ID) ?? "1628678015262671191";
+
+export interface SyncConfig {
+  autoSync: boolean; // Vercel Cron による日次自動同期の有効/無効
+  searchRefreshDays: number;
+  ratesRefreshDays: number;
+  dailyRatesCalls: number; // 0 = 自動同期での料金取得なし
+  luminaListingId: string; // 自物件 (ベンチマーク対象) のAirbnbリスティングID
+}
+
+/** Webアプリの設定画面で保存された値 (sync_state) を環境変数既定値とマージして返す */
+export async function getSyncConfig(db: Client): Promise<SyncConfig> {
+  const res = await db.execute("SELECT key, value FROM sync_state WHERE key LIKE 'config:%'");
+  const map = new Map(res.rows.map((r) => [String(r.key), String(r.value ?? "")]));
+  const numOr = (key: string, fallback: number) => {
+    const v = map.get(key);
+    if (v === undefined || v === "") return fallback;
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? n : fallback;
+  };
+  return {
+    autoSync: (map.get("config:auto_sync") ?? "1") !== "0",
+    searchRefreshDays: numOr("config:search_refresh_days", DEFAULT_SEARCH_REFRESH_DAYS),
+    ratesRefreshDays: numOr("config:rates_refresh_days", DEFAULT_RATES_REFRESH_DAYS),
+    dailyRatesCalls: numOr("config:daily_rates_calls", DEFAULT_DAILY_RATES_CALLS),
+    luminaListingId: map.get("config:lumina_listing_id")?.trim() || DEFAULT_LUMINA_LISTING_ID,
+  };
+}
+
+export async function saveSyncConfig(db: Client, config: Partial<SyncConfig>): Promise<void> {
+  const entries: [string, string][] = [];
+  if (config.autoSync !== undefined) entries.push(["config:auto_sync", config.autoSync ? "1" : "0"]);
+  if (config.searchRefreshDays !== undefined)
+    entries.push(["config:search_refresh_days", String(config.searchRefreshDays)]);
+  if (config.ratesRefreshDays !== undefined)
+    entries.push(["config:rates_refresh_days", String(config.ratesRefreshDays)]);
+  if (config.dailyRatesCalls !== undefined)
+    entries.push(["config:daily_rates_calls", String(config.dailyRatesCalls)]);
+  if (config.luminaListingId !== undefined)
+    entries.push(["config:lumina_listing_id", config.luminaListingId.trim()]);
+  for (const [key, value] of entries) {
+    await db.execute({
+      sql: `INSERT INTO sync_state (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+      args: [key, value],
+    });
+  }
+}
 
 export const COST_PER_SEARCH_CALL = 0.5; // USD
 export const COST_PER_RATES_CALL = 0.1; // USD
@@ -272,16 +320,47 @@ export interface SyncStepResult {
   error?: string;
 }
 
+/** 自物件 (Lumina Fuji) の料金カレンダーを lumina_fuji_metrics に取り込む */
+async function refreshLuminaRates(db: Client, listingId: string): Promise<number> {
+  const ratesRes = await airRoiGet<FutureRatesResponse>(
+    `/listings/future/rates?id=${encodeURIComponent(listingId)}&currency=native`,
+  );
+  const stmts: InStatement[] = [];
+  for (const day of ratesRes.rates ?? []) {
+    if (!day.date) continue;
+    const rawPrice = num(day.rate);
+    const available = Boolean(day.available);
+    const price = available && rawPrice !== null && rawPrice > 0 ? rawPrice : 0;
+    stmts.push({
+      sql: `INSERT INTO lumina_fuji_metrics (target_date, configured_price, is_booked)
+            VALUES (?, ?, ?)
+            ON CONFLICT(target_date) DO UPDATE SET
+              configured_price=CASE WHEN excluded.configured_price > 0 THEN excluded.configured_price ELSE lumina_fuji_metrics.configured_price END,
+              is_booked=excluded.is_booked`,
+      args: [String(day.date).slice(0, 10), price, available ? 0 : 1],
+    });
+  }
+  stmts.push({
+    sql: `INSERT INTO sync_state (key, value) VALUES ('lumina_rates_at', datetime('now'))
+          ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+    args: [],
+  });
+  await db.batch(stmts, "write");
+  return stmts.length - 1;
+}
+
 /**
  * 増分同期を1ステップ実行する。
- * - カタログが SEARCH_REFRESH_DAYS より古いエリアを再検索
- * - 料金が RATES_REFRESH_DAYS より古い物件を古い順に更新 (capRemaining 件まで)
+ * - カタログが searchRefreshDays より古いエリアを再検索
+ * - 自物件 (Lumina Fuji) の料金が古ければ更新
+ * - 料金が ratesRefreshDays より古い物件を古い順に更新 (capRemaining 件まで)
  * 時間予算内に終わらなかった分は PARTIAL で返し、呼び出し側がチェーンで継続する。
  */
 export async function syncStep(
   db: Client,
   syncType: "cron_daily" | "manual_refresh",
   capRemaining: number | null,
+  config: SyncConfig,
 ): Promise<SyncStepResult> {
   const startedAt = Date.now();
   const catalogRefreshed: string[] = [];
@@ -335,7 +414,7 @@ export async function syncStep(
     // 1. カタログ更新が必要なエリア (sync_state の catalog:<area> が古い/未登録)
     const freshRes = await db.execute({
       sql: `SELECT key FROM sync_state WHERE key LIKE 'catalog:%' AND value >= datetime('now', ?)`,
-      args: [`-${SEARCH_REFRESH_DAYS} days`],
+      args: [`-${config.searchRefreshDays} days`],
     });
     const fresh = new Set(freshRes.rows.map((r) => String(r.key).slice("catalog:".length)));
     let staleAreas = ALL_AREAS.filter((a) => !fresh.has(a));
@@ -349,9 +428,26 @@ export async function syncStep(
       console.log(`AirROI sync: カタログ更新 ${area} (${r.listings}物件, 検索${r.searchCalls}回)`);
     }
 
-    // 2. 料金カレンダーが古い物件を古い順に更新
+    // 2. 自物件 (Lumina Fuji) のベンチマーク用料金 — 競合と同じ周期で更新
+    if (config.luminaListingId) {
+      const luminaFresh = await db.execute({
+        sql: `SELECT 1 FROM sync_state WHERE key = 'lumina_rates_at' AND value >= datetime('now', ?)`,
+        args: [`-${config.ratesRefreshDays} days`],
+      });
+      if (luminaFresh.rows.length === 0) {
+        try {
+          recordsFetched += await refreshLuminaRates(db, config.luminaListingId);
+          ratesCalls += 1;
+          console.log(`AirROI sync: Lumina Fuji (${config.luminaListingId}) の料金を更新`);
+        } catch (err) {
+          console.error("AirROI sync: Lumina Fuji の料金取得に失敗:", err);
+        }
+      }
+    }
+
+    // 3. 料金カレンダーが古い物件を古い順に更新
     const staleCondition = `id LIKE 'airroi_%' AND (rates_synced_at IS NULL OR rates_synced_at < datetime('now', ?))`;
-    const staleArg = `-${RATES_REFRESH_DAYS} days`;
+    const staleArg = `-${config.ratesRefreshDays} days`;
     while (
       (capRemaining === null || capRemaining > 0) &&
       Date.now() - startedAt < HARD_BUDGET_MS
@@ -377,7 +473,7 @@ export async function syncStep(
       if (capRemaining !== null) capRemaining -= staleRes.rows.length;
     }
 
-    // 3. 残作業を数えて状態を決める
+    // 4. 残作業を数えて状態を決める
     const remainRes = await db.execute({
       sql: `SELECT COUNT(*) AS c FROM properties WHERE ${staleCondition}`,
       args: [staleArg],
@@ -391,7 +487,7 @@ export async function syncStep(
     }
     const message =
       capExhausted && ratesRemaining > 0
-        ? `1回の同期の呼び出し上限 (${DAILY_RATES_CALLS}件) に達しました。残り${ratesRemaining}物件は次回の同期で更新されます`
+        ? `1回の同期の呼び出し上限 (${config.dailyRatesCalls}件) に達しました。残り${ratesRemaining}物件は次回の同期で更新されます`
         : undefined;
     return finalize("SUCCESS", staleAreas, ratesRemaining, message);
   } catch (err) {

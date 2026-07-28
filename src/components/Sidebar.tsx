@@ -9,6 +9,7 @@ import {
   PROPERTY_TYPES,
   TIME_RANGES,
 } from "@/lib/types";
+import SettingsPanel from "./SettingsPanel";
 
 const selectClass =
   "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:border-indigo-500 focus:outline-none";
@@ -111,7 +112,7 @@ export default function Sidebar({ dataSource }: { dataSource: "turso" | "demo" }
         <label className={labelClass}>分析期間</label>
         <select
           className={selectClass}
-          value={get("range", "past30")}
+          value={get("range", "next30")}
           onChange={(e) => setParam("range", e.target.value)}
         >
           {TIME_RANGES.map((t) => (
@@ -198,6 +199,7 @@ export default function Sidebar({ dataSource }: { dataSource: "turso" | "demo" }
         </button>
         {syncMessage && <p className="text-xs text-slate-500">{syncMessage}</p>}
         {isPending && <p className="text-xs text-indigo-500">再集計中...</p>}
+        <SettingsPanel />
       </div>
     </aside>
   );

@@ -1,5 +1,5 @@
 import { waitUntil } from "@vercel/functions";
-import { DAILY_RATES_CALLS, syncStep, type SyncStepResult } from "./airroi";
+import { getSyncConfig, syncStep, type SyncStepResult } from "./airroi";
 import { ensureSchema, getDb } from "./db";
 
 export type SyncRunResult = SyncStepResult | { status: "SKIPPED"; message: string };
@@ -9,7 +9,7 @@ export interface SyncRunOptions {
   reset?: boolean;
   /** データは保持しつつ全物件を「要更新」扱いにする (呼び出し上限なし) */
   force?: boolean;
-  /** このチェーンで残っている料金取得の上限 (チェーン継続用。undefined=既定値) */
+  /** このチェーンで残っている料金取得の上限 (チェーン継続用。undefined=設定値) */
   cap?: number | null;
 }
 
@@ -37,23 +37,33 @@ export async function runChunkedSync(
   }
 
   await ensureSchema(db);
+  const config = await getSyncConfig(db);
+
+  if (syncType === "cron_daily" && !config.autoSync) {
+    return {
+      status: "SKIPPED",
+      message: "自動同期は設定画面でオフになっています (手動更新は利用可能です)",
+    };
+  }
 
   if (opts.reset) {
     console.log("AirROI sync: reset指定のため全データを削除して再取得します");
     await db.execute("DELETE FROM daily_metrics");
     await db.execute("DELETE FROM properties WHERE id LIKE 'airroi_%'");
     await db.execute("DELETE FROM sync_state WHERE key LIKE 'catalog:%'");
+    await db.execute("DELETE FROM sync_state WHERE key = 'lumina_rates_at'");
   } else if (opts.force) {
     console.log("AirROI sync: force指定のため全物件を要更新扱いにします");
     await db.execute("UPDATE properties SET rates_synced_at = NULL");
     await db.execute("DELETE FROM sync_state WHERE key LIKE 'catalog:%'");
+    await db.execute("DELETE FROM sync_state WHERE key = 'lumina_rates_at'");
   }
 
-  // reset/force は全件処理のため上限なし。通常はチェーン全体で DAILY_RATES_CALLS 件まで。
+  // reset/force は全件処理のため上限なし。通常はチェーン全体で設定値の件数まで。
   const cap =
-    opts.reset || opts.force ? null : opts.cap === undefined ? DAILY_RATES_CALLS : opts.cap;
+    opts.reset || opts.force ? null : opts.cap === undefined ? config.dailyRatesCalls : opts.cap;
 
-  const result = await syncStep(db, syncType, cap);
+  const result = await syncStep(db, syncType, cap, config);
 
   if (result.status === "PARTIAL") {
     chainNext(result.capRemaining);

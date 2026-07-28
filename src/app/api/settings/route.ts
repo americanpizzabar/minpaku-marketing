@@ -65,7 +65,13 @@ export async function POST(request: NextRequest) {
     searchRefreshDays: numField(body.searchRefreshDays, 7, 365),
     dailyRatesCalls: numField(body.dailyRatesCalls, 0, 1000),
     luminaListingId,
+    luminaBasePrice: numField(body.luminaBasePrice, 0, 10_000_000),
   });
+
+  // 自物件の設定が変わったら次回同期で即時反映されるよう鮮度をリセットする
+  if (luminaListingId !== undefined || body.luminaBasePrice !== undefined) {
+    await db.execute("DELETE FROM sync_state WHERE key = 'lumina_rates_at'");
+  }
 
   const config = await getSyncConfig(db);
   const countRes = await db.execute(

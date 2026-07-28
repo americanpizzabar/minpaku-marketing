@@ -152,6 +152,7 @@ export interface PropertyRow {
   occupancyRate: number; // 0-100 (%)
   adr: number;
   pricePerGuest: number;
+  minNights: number; // 期間内で最も多い最低泊数
   url: string | null;
 }
 

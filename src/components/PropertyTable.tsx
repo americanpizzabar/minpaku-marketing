@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { PROPERTY_TYPES, type PropertyRow } from "@/lib/types";
 
-type SortKey = "title" | "area" | "bedrooms" | "maxGuests" | "occupancyRate" | "adr" | "pricePerGuest" | "rating";
+type SortKey = "title" | "area" | "bedrooms" | "maxGuests" | "occupancyRate" | "adr" | "pricePerGuest" | "minNights" | "rating";
 
 const typeLabel = (value: string) =>
   PROPERTY_TYPES.find((t) => t.value === value)?.label ?? value;
@@ -18,6 +18,7 @@ function toCsv(rows: PropertyRow[]): string {
     "稼働率(%)",
     "ADR(円)",
     "1人当たり単価(円)",
+    "最低泊数",
     "評価",
     "レビュー数",
     "AirROI ID",
@@ -33,6 +34,7 @@ function toCsv(rows: PropertyRow[]): string {
       r.occupancyRate,
       r.adr,
       r.pricePerGuest,
+      r.minNights,
       r.rating ?? "",
       r.reviewsCount,
       r.airroiId,
@@ -124,6 +126,7 @@ export default function PropertyTable({ rows }: { rows: PropertyRow[] }) {
               {th("稼働率", "occupancyRate")}
               {th("ADR", "adr")}
               {th("1人単価", "pricePerGuest")}
+              {th("最低泊数", "minNights")}
               {th("評価", "rating")}
               <th className="px-3 py-2 text-right text-xs font-semibold whitespace-nowrap text-slate-500">
                 AirROI ID
@@ -162,6 +165,7 @@ export default function PropertyTable({ rows }: { rows: PropertyRow[] }) {
                 <td className="px-3 py-2 text-right text-slate-600">
                   ¥{r.pricePerGuest.toLocaleString("ja-JP")}
                 </td>
+                <td className="px-3 py-2 text-right text-slate-600">{r.minNights}泊</td>
                 <td className="px-3 py-2 text-right text-slate-600">
                   {r.rating != null ? `★${r.rating.toFixed(2)}` : "—"}
                 </td>
@@ -170,7 +174,7 @@ export default function PropertyTable({ rows }: { rows: PropertyRow[] }) {
             ))}
             {sorted.length === 0 && (
               <tr>
-                <td colSpan={10} className="px-3 py-8 text-center text-sm text-slate-400">
+                <td colSpan={11} className="px-3 py-8 text-center text-sm text-slate-400">
                   条件に一致する物件がありません。フィルタを緩めてください。
                 </td>
               </tr>

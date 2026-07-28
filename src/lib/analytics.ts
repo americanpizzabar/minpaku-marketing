@@ -51,6 +51,19 @@ interface PropertyStats {
   prices: number[];
   booked: number;
   total: number;
+  minNightsCount: Map<number, number>;
+}
+
+function modeOf(counts: Map<number, number>): number {
+  let best = 1;
+  let bestCount = -1;
+  for (const [v, c] of counts) {
+    if (c > bestCount) {
+      best = v;
+      bestCount = c;
+    }
+  }
+  return best;
 }
 
 export async function getDashboardData(filters: Filters): Promise<DashboardData> {
@@ -73,13 +86,15 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
   for (const m of dayFiltered) {
     let s = statsMap.get(m.propertyId);
     if (!s) {
-      s = { prices: [], booked: 0, total: 0 };
+      s = { prices: [], booked: 0, total: 0, minNightsCount: new Map() };
       statsMap.set(m.propertyId, s);
     }
     // price_jpy=0 は価格情報なし (予約済み日はダミー価格のため保存していない)
     if (m.priceJpy > 0) s.prices.push(m.priceJpy);
     s.total += 1;
     if (!m.isAvailable) s.booked += 1;
+    const mn = m.minNights > 0 ? m.minNights : 1;
+    s.minNightsCount.set(mn, (s.minNightsCount.get(mn) ?? 0) + 1);
   }
 
   props = props.filter((p) => {
@@ -119,6 +134,7 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
       occupancyRate: Math.round(occ * 1000) / 10,
       adr: Math.round(adr),
       pricePerGuest: Math.round(adr / Math.max(p.maxGuests, 1)),
+      minNights: modeOf(s.minNightsCount),
       url: p.url,
     });
     scatter.push({

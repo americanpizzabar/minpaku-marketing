@@ -41,6 +41,7 @@ export interface SyncConfig {
   ratesRefreshDays: number;
   dailyRatesCalls: number; // 0 = 自動同期での料金取得なし
   luminaListingId: string; // 自物件 (ベンチマーク対象) のAirbnbリスティングID
+  luminaBasePrice: number; // 自物件がAirROI未収録の場合に使う基準価格 (円/泊, 0=未設定)
 }
 
 /** Webアプリの設定画面で保存された値 (sync_state) を環境変数既定値とマージして返す */
@@ -59,6 +60,7 @@ export async function getSyncConfig(db: Client): Promise<SyncConfig> {
     ratesRefreshDays: numOr("config:rates_refresh_days", DEFAULT_RATES_REFRESH_DAYS),
     dailyRatesCalls: numOr("config:daily_rates_calls", DEFAULT_DAILY_RATES_CALLS),
     luminaListingId: map.get("config:lumina_listing_id")?.trim() || DEFAULT_LUMINA_LISTING_ID,
+    luminaBasePrice: numOr("config:lumina_base_price", Number(process.env.LUMINA_BASE_PRICE ?? 0)),
   };
 }
 
@@ -73,6 +75,8 @@ export async function saveSyncConfig(db: Client, config: Partial<SyncConfig>): P
     entries.push(["config:daily_rates_calls", String(config.dailyRatesCalls)]);
   if (config.luminaListingId !== undefined)
     entries.push(["config:lumina_listing_id", config.luminaListingId.trim()]);
+  if (config.luminaBasePrice !== undefined)
+    entries.push(["config:lumina_base_price", String(config.luminaBasePrice)]);
   for (const [key, value] of entries) {
     await db.execute({
       sql: `INSERT INTO sync_state (key, value) VALUES (?, ?)
@@ -320,33 +324,64 @@ export interface SyncStepResult {
   error?: string;
 }
 
-/** 自物件 (Lumina Fuji) の料金カレンダーを lumina_fuji_metrics に取り込む */
-async function refreshLuminaRates(db: Client, listingId: string): Promise<number> {
-  const ratesRes = await airRoiGet<FutureRatesResponse>(
-    `/listings/future/rates?id=${encodeURIComponent(listingId)}&currency=native`,
-  );
+/**
+ * 自物件 (Lumina Fuji) の料金カレンダーを lumina_fuji_metrics に取り込む。
+ * AirROI未収録 (404) の場合は、設定された基準価格で今後365日を埋める
+ * (実データが取れるようになれば自動的に上書きされる)。
+ */
+async function refreshLuminaRates(
+  db: Client,
+  config: SyncConfig,
+): Promise<{ records: number; usedApi: boolean }> {
   const stmts: InStatement[] = [];
-  for (const day of ratesRes.rates ?? []) {
-    if (!day.date) continue;
-    const rawPrice = num(day.rate);
-    const available = Boolean(day.available);
-    const price = available && rawPrice !== null && rawPrice > 0 ? rawPrice : 0;
-    stmts.push({
-      sql: `INSERT INTO lumina_fuji_metrics (target_date, configured_price, is_booked)
-            VALUES (?, ?, ?)
-            ON CONFLICT(target_date) DO UPDATE SET
-              configured_price=CASE WHEN excluded.configured_price > 0 THEN excluded.configured_price ELSE lumina_fuji_metrics.configured_price END,
-              is_booked=excluded.is_booked`,
-      args: [String(day.date).slice(0, 10), price, available ? 0 : 1],
-    });
+  let usedApi = false;
+
+  try {
+    const ratesRes = await airRoiGet<FutureRatesResponse>(
+      `/listings/future/rates?id=${encodeURIComponent(config.luminaListingId)}&currency=native`,
+    );
+    usedApi = true;
+    for (const day of ratesRes.rates ?? []) {
+      if (!day.date) continue;
+      const rawPrice = num(day.rate);
+      const available = Boolean(day.available);
+      const price = available && rawPrice !== null && rawPrice > 0 ? rawPrice : 0;
+      stmts.push({
+        sql: `INSERT INTO lumina_fuji_metrics (target_date, configured_price, is_booked)
+              VALUES (?, ?, ?)
+              ON CONFLICT(target_date) DO UPDATE SET
+                configured_price=CASE WHEN excluded.configured_price > 0 THEN excluded.configured_price ELSE lumina_fuji_metrics.configured_price END,
+                is_booked=excluded.is_booked`,
+        args: [String(day.date).slice(0, 10), price, available ? 0 : 1],
+      });
+    }
+  } catch (err) {
+    usedApi = true; // 404でもコールは消費されている
+    console.error(`AirROI: Lumina Fuji (${config.luminaListingId}) の料金取得に失敗:`, err);
+    if (config.luminaBasePrice > 0) {
+      // フォールバック: 基準価格で今後365日を埋める (実データ由来の価格は上書きしない)
+      console.log(`AirROI: 基準価格 ¥${config.luminaBasePrice} でベンチマークを生成します`);
+      const today = new Date();
+      for (let i = 0; i < 365; i++) {
+        const d = new Date(today.getTime() + i * 86400_000);
+        stmts.push({
+          sql: `INSERT INTO lumina_fuji_metrics (target_date, configured_price, is_booked)
+                VALUES (?, ?, 0)
+                ON CONFLICT(target_date) DO UPDATE SET
+                  configured_price=CASE WHEN lumina_fuji_metrics.configured_price > 0 THEN lumina_fuji_metrics.configured_price ELSE excluded.configured_price END`,
+          args: [d.toISOString().slice(0, 10), config.luminaBasePrice],
+        });
+      }
+    }
   }
+
   stmts.push({
     sql: `INSERT INTO sync_state (key, value) VALUES ('lumina_rates_at', datetime('now'))
           ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
     args: [],
   });
   await db.batch(stmts, "write");
-  return stmts.length - 1;
+  return { records: stmts.length - 1, usedApi };
 }
 
 /**
@@ -436,11 +471,12 @@ export async function syncStep(
       });
       if (luminaFresh.rows.length === 0) {
         try {
-          recordsFetched += await refreshLuminaRates(db, config.luminaListingId);
-          ratesCalls += 1;
+          const r = await refreshLuminaRates(db, config);
+          recordsFetched += r.records;
+          if (r.usedApi) ratesCalls += 1;
           console.log(`AirROI sync: Lumina Fuji (${config.luminaListingId}) の料金を更新`);
         } catch (err) {
-          console.error("AirROI sync: Lumina Fuji の料金取得に失敗:", err);
+          console.error("AirROI sync: Lumina Fuji の料金更新に失敗:", err);
         }
       }
     }

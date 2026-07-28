@@ -8,6 +8,7 @@ interface SettingsState {
   searchRefreshDays: number;
   dailyRatesCalls: number;
   luminaListingId: string;
+  luminaBasePrice: number;
 }
 
 const inputClass =
@@ -41,6 +42,7 @@ export default function SettingsPanel() {
           searchRefreshDays: json.config.searchRefreshDays,
           dailyRatesCalls: json.config.dailyRatesCalls,
           luminaListingId: json.config.luminaListingId,
+          luminaBasePrice: json.config.luminaBasePrice,
         });
         setTracked(json.trackedProperties);
         setMonthlyCost(json.estimatedMonthlyCostUsd);
@@ -67,9 +69,10 @@ export default function SettingsPanel() {
           searchRefreshDays: json.config.searchRefreshDays,
           dailyRatesCalls: json.config.dailyRatesCalls,
           luminaListingId: json.config.luminaListingId,
+          luminaBasePrice: json.config.luminaBasePrice,
         });
         setMonthlyCost(json.estimatedMonthlyCostUsd);
-        setMessage("設定を保存しました");
+        setMessage("設定を保存しました (自物件の変更は次回の同期で反映されます)");
       } else {
         setMessage(json.error ?? "保存に失敗しました");
       }
@@ -158,6 +161,22 @@ export default function SettingsPanel() {
                   onChange={(e) => setForm({ ...form, luminaListingId: e.target.value })}
                   placeholder="例: 1628678015262671191"
                 />
+              </div>
+
+              <div>
+                <label className={labelClass}>自物件の基準価格 (円/泊)</label>
+                <input
+                  type="number"
+                  className={inputClass}
+                  value={form.luminaBasePrice || ""}
+                  onChange={(e) =>
+                    setForm({ ...form, luminaBasePrice: Number(e.target.value) || 0 })
+                  }
+                  placeholder="例: 78000"
+                />
+                <p className="mt-1 text-[11px] text-slate-400">
+                  AirROIに自物件が未収録の間、この価格でベンチマーク線を表示します
+                </p>
               </div>
 
               <p className="text-xs text-slate-500">

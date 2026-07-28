@@ -378,16 +378,26 @@ export async function refreshLuminaRates(
     source = "manual";
     console.error(`AirROI: Lumina Fuji (${config.luminaListingId}) の料金取得に失敗:`, err);
     if (config.luminaBasePrice > 0) {
-      // フォールバック: 基準価格で今後365日を埋める (実データ由来の価格は上書きしない)
+      // フォールバック: 基準価格で今後365日を埋める。
+      // 前回がAPI実データの場合のみ既存価格を保持し、旧基準価格は新しい値で上書きする。
+      const prevSourceRes = await db.execute(
+        "SELECT value FROM sync_state WHERE key = 'lumina_source'",
+      );
+      const prevWasApi = prevSourceRes.rows[0] && String(prevSourceRes.rows[0].value) === "api";
       console.log(`AirROI: 基準価格 ¥${config.luminaBasePrice} でベンチマークを生成します`);
       const today = new Date();
       for (let i = 0; i < 365; i++) {
         const d = new Date(today.getTime() + i * 86400_000);
         stmts.push({
-          sql: `INSERT INTO lumina_fuji_metrics (target_date, configured_price, is_booked)
-                VALUES (?, ?, 0)
-                ON CONFLICT(target_date) DO UPDATE SET
-                  configured_price=CASE WHEN lumina_fuji_metrics.configured_price > 0 THEN lumina_fuji_metrics.configured_price ELSE excluded.configured_price END`,
+          sql: prevWasApi
+            ? `INSERT INTO lumina_fuji_metrics (target_date, configured_price, is_booked)
+               VALUES (?, ?, 0)
+               ON CONFLICT(target_date) DO UPDATE SET
+                 configured_price=CASE WHEN lumina_fuji_metrics.configured_price > 0 THEN lumina_fuji_metrics.configured_price ELSE excluded.configured_price END`
+            : `INSERT INTO lumina_fuji_metrics (target_date, configured_price, is_booked)
+               VALUES (?, ?, 0)
+               ON CONFLICT(target_date) DO UPDATE SET
+                 configured_price=excluded.configured_price`,
           args: [d.toISOString().slice(0, 10), config.luminaBasePrice],
         });
       }

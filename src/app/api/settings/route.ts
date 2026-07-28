@@ -4,13 +4,41 @@ import { ensureSchema, getDb } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
-/** 現在のデータ取得設定と、その設定での推定月額コストを返す */
-export async function GET() {
+/**
+ * 現在のデータ取得設定と、その設定での推定月額コストを返す。
+ * CRON_SECRET付き (`key`) の場合はクエリパラメータでの設定保存にも対応 (リモート管理用)。
+ */
+export async function GET(request: NextRequest) {
   const db = getDb();
   if (!db) {
     return NextResponse.json({ configured: false, message: "デモモードのため設定はありません" });
   }
   await ensureSchema(db);
+
+  const params = request.nextUrl.searchParams;
+  const secret = process.env.CRON_SECRET;
+  if (secret && params.get("key") === secret) {
+    const numParam = (name: string, min: number, max: number): number | undefined => {
+      const v = params.get(name);
+      if (v === null || v === "") return undefined;
+      const n = Number(v);
+      if (!Number.isFinite(n)) return undefined;
+      return Math.max(min, Math.min(max, Math.round(n)));
+    };
+    const autoSyncParam = params.get("autoSync");
+    await saveSyncConfig(db, {
+      autoSync: autoSyncParam === null ? undefined : autoSyncParam !== "0",
+      ratesRefreshDays: numParam("ratesRefreshDays", 1, 90),
+      searchRefreshDays: numParam("searchRefreshDays", 7, 365),
+      dailyRatesCalls: numParam("dailyRatesCalls", 0, 1000),
+      luminaListingId: params.get("luminaListingId")?.replace(/\D/g, "") || undefined,
+      luminaBasePrice: numParam("luminaBasePrice", 0, 10_000_000),
+    });
+    if (params.get("luminaListingId") !== null || params.get("luminaBasePrice") !== null) {
+      await db.execute("DELETE FROM sync_state WHERE key = 'lumina_rates_at'");
+    }
+  }
+
   const config = await getSyncConfig(db);
   const countRes = await db.execute(
     "SELECT COUNT(*) AS c FROM properties WHERE id LIKE 'airroi_%'",

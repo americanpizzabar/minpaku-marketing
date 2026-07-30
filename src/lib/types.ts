@@ -184,6 +184,24 @@ export interface PropertyRow {
   url: string | null;
 }
 
+export interface MapPoint {
+  id: string;
+  title: string;
+  area: string;
+  lat: number;
+  lng: number;
+  adr: number;
+  occupancyRate: number; // 0-100 (%)
+  pricePerGuest: number;
+  l90dOccupancy: number | null; // 0-100 (%)
+  l90dAvgRate: number | null;
+  maxGuests: number;
+  bedrooms: number;
+  rating: number | null;
+  url: string | null;
+  isLumina?: boolean;
+}
+
 export interface DashboardData {
   kpis: Kpis;
   scatter: ScatterPoint[];
@@ -191,6 +209,7 @@ export interface DashboardData {
   capacityBars: CapacityBar[];
   benchmark: BenchmarkPoint[];
   rows: PropertyRow[];
+  mapPoints: MapPoint[];
   dataSource: "turso" | "demo";
   periodLabel: string;
   lastSyncedAt: string | null;

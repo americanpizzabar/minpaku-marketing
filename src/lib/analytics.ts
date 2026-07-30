@@ -11,6 +11,7 @@ import {
   type DashboardData,
   type Filters,
   type Kpis,
+  type MapPoint,
   type Property,
   type PropertyRow,
   type ScatterPoint,
@@ -122,6 +123,7 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
   const ppgs: number[] = [];
   const rows: PropertyRow[] = [];
   const scatter: ScatterPoint[] = [];
+  const mapPoints: MapPoint[] = [];
 
   for (const p of props) {
     const s = statsMap.get(p.id)!;
@@ -162,6 +164,24 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
       l90dOccupancy: p.l90dOccupancy,
       l90dAvgRate: p.l90dAvgRate !== null ? Math.round(p.l90dAvgRate) : null,
     });
+    if (p.latitude !== null && p.longitude !== null) {
+      mapPoints.push({
+        id: p.id,
+        title: p.title,
+        area: p.area,
+        lat: p.latitude,
+        lng: p.longitude,
+        adr: Math.round(adr),
+        occupancyRate: Math.round(occ * 1000) / 10,
+        pricePerGuest: Math.round(adr / Math.max(p.maxGuests, 1)),
+        l90dOccupancy: p.l90dOccupancy,
+        l90dAvgRate: p.l90dAvgRate !== null ? Math.round(p.l90dAvgRate) : null,
+        maxGuests: p.maxGuests,
+        bedrooms: p.bedrooms,
+        rating: p.rating,
+        url: p.url,
+      });
+    }
   }
   rows.sort((a, b) => b.adr - a.adr);
 
@@ -187,6 +207,24 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
       url: lp.listingId ? `https://www.airbnb.jp/rooms/${lp.listingId}` : null,
       l90dOccupancy: null,
       l90dAvgRate: null,
+      isLumina: true,
+    });
+    // 地図用の自物件マーカー (正確な座標は未取得のため山中湖村の中心を目安表示)
+    mapPoints.push({
+      id: "lumina",
+      title: `${LUMINA_PROFILE.title} (位置は目安)`,
+      area: LUMINA_PROFILE.area,
+      lat: 35.4167,
+      lng: 138.8667,
+      adr: Math.round(luminaAdr),
+      occupancyRate: Math.round(luminaOcc * 1000) / 10,
+      pricePerGuest: Math.round(luminaAdr / Math.max(lp.maxGuests, 1)),
+      l90dOccupancy: null,
+      l90dAvgRate: null,
+      maxGuests: lp.maxGuests,
+      bedrooms: lp.bedrooms,
+      rating: null,
+      url: lp.listingId ? `https://www.airbnb.jp/rooms/${lp.listingId}` : null,
       isLumina: true,
     });
   }
@@ -287,6 +325,7 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
     capacityBars,
     benchmark,
     rows,
+    mapPoints,
     dataSource: ds.dataSource,
     periodLabel: `${periodLabel}: ${start} 〜 ${end}`,
     lastSyncedAt: ds.lastSyncedAt,

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useState, useTransition } from "react";
 import {
@@ -74,6 +75,26 @@ export default function Sidebar({ dataSource }: { dataSource: "turso" | "demo" }
         >
           {dataSource === "turso" ? "Turso DB 接続中" : "デモデータモード"}
         </span>
+        <nav className="mt-3 flex gap-1">
+          {(
+            [
+              ["/", "📊 ダッシュボード"],
+              ["/map", "🗺 地図"],
+            ] as const
+          ).map(([href, label]) => (
+            <Link
+              key={href}
+              href={`${href}${searchParams.toString() ? `?${searchParams.toString()}` : ""}`}
+              className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                pathname === href
+                  ? "bg-indigo-600 text-white"
+                  : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+              }`}
+            >
+              {label}
+            </Link>
+          ))}
+        </nav>
       </div>
 
       <div>

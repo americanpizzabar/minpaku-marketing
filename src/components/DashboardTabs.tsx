@@ -29,8 +29,19 @@ const TABS = [
 const yen = (v: number) => `¥${Math.round(v).toLocaleString("ja-JP")}`;
 
 function ScatterTab({ data }: { data: ScatterPoint[] }) {
-  const competitors = data.filter((d) => !d.isLumina);
-  const lumina = data.filter((d) => d.isLumina);
+  const [mode, setMode] = useState<"forecast" | "actual">("forecast");
+  // 実績モード: AirROI集計の過去90日 実績単価×実績稼働率に軸を差し替える
+  const toActual = (d: ScatterPoint): ScatterPoint | null =>
+    d.l90dAvgRate !== null && d.l90dOccupancy !== null
+      ? { ...d, adr: d.l90dAvgRate, occupancyRate: d.l90dOccupancy }
+      : null;
+  const viewData =
+    mode === "actual"
+      ? data.map(toActual).filter((d): d is ScatterPoint => d !== null)
+      : data;
+  const competitors = viewData.filter((d) => !d.isLumina);
+  const lumina = viewData.filter((d) => d.isLumina);
+  const actualAvailable = data.some((d) => d.l90dAvgRate !== null && d.l90dOccupancy !== null);
   const [selected, setSelected] = useState<ScatterPoint | null>(null);
 
   // 1回目のタップで物件を選択して詳細+リンクを表示、同じ点をもう一度タップするとリンクを開く
@@ -49,6 +60,32 @@ function ScatterTab({ data }: { data: ScatterPoint[] }) {
 
   return (
     <div>
+      <div className="mb-2 flex items-center gap-1">
+        {(
+          [
+            ["forecast", "推定 (今後の販売価格)"],
+            ["actual", "実績 (過去90日)"],
+          ] as const
+        ).map(([value, label]) => (
+          <button
+            key={value}
+            onClick={() => setMode(value)}
+            disabled={value === "actual" && !actualAvailable}
+            className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+              mode === value
+                ? "bg-indigo-600 text-white"
+                : "bg-slate-100 text-slate-600 hover:bg-slate-200 disabled:opacity-40"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+        {!actualAvailable && (
+          <span className="text-[11px] text-slate-400">
+            実績データは「物件情報を今すぐ更新」(設定) 後に利用できます
+          </span>
+        )}
+      </div>
       {selected && (
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs">
           <div className="min-w-0">

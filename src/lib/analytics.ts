@@ -145,6 +145,10 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
       pricePerGuest: Math.round(adr / Math.max(p.maxGuests, 1)),
       minNights: modeOf(s.minNightsCount),
       areaSqm: p.areaSqm,
+      cleaningFee: p.cleaningFee,
+      superhost: p.superhost,
+      l90dOccupancy: p.l90dOccupancy,
+      l90dAvgRate: p.l90dAvgRate !== null ? Math.round(p.l90dAvgRate) : null,
       url: p.url,
     });
     scatter.push({
@@ -155,6 +159,8 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
       occupancyRate: Math.round(occ * 1000) / 10,
       maxGuests: p.maxGuests,
       url: p.url,
+      l90dOccupancy: p.l90dOccupancy,
+      l90dAvgRate: p.l90dAvgRate !== null ? Math.round(p.l90dAvgRate) : null,
     });
   }
   rows.sort((a, b) => b.adr - a.adr);
@@ -179,6 +185,8 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
       occupancyRate: Math.round(luminaOcc * 1000) / 10,
       maxGuests: lp.maxGuests,
       url: lp.listingId ? `https://www.airbnb.jp/rooms/${lp.listingId}` : null,
+      l90dOccupancy: null,
+      l90dAvgRate: null,
       isLumina: true,
     });
   }

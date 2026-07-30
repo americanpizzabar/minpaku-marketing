@@ -81,6 +81,20 @@ export interface Property {
   rating: number | null;
   reviewsCount: number;
   url: string | null;
+  // ---- カタログ検索から取得する追加属性 ----
+  cleaningFee: number | null;
+  superhost: boolean | null;
+  instantBook: boolean | null;
+  guestFavorite: boolean | null;
+  beds: number | null;
+  hostName: string | null;
+  // 過去実績 (l90d=過去90日, ttm=過去12ヶ月)。稼働率は%表記
+  l90dOccupancy: number | null;
+  l90dAvgRate: number | null;
+  l90dRevpar: number | null;
+  ttmOccupancy: number | null;
+  ttmAvgRate: number | null;
+  ttmRevpar: number | null;
 }
 
 export interface DailyMetric {
@@ -120,6 +134,9 @@ export interface ScatterPoint {
   occupancyRate: number; // 0-100 (%)
   maxGuests: number;
   url: string | null;
+  // 過去90日の実績 (実績表示モード用)
+  l90dOccupancy: number | null;
+  l90dAvgRate: number | null;
   isLumina?: boolean;
 }
 
@@ -160,6 +177,10 @@ export interface PropertyRow {
   pricePerGuest: number;
   minNights: number; // 期間内で最も多い最低泊数
   areaSqm: number | null; // 部屋面積 (m²)
+  cleaningFee: number | null;
+  superhost: boolean | null;
+  l90dOccupancy: number | null; // 過去90日の実績稼働率 (%)
+  l90dAvgRate: number | null; // 過去90日の実績平均単価
   url: string | null;
 }
 

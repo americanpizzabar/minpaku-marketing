@@ -25,6 +25,7 @@ export async function GET(request: NextRequest) {
     const result = await runChunkedSync("manual_refresh", {
       reset: params.get("reset") === "1",
       force: params.get("force") === "1",
+      catalogOnly: params.get("catalog") === "1",
       cap,
     });
     return NextResponse.json(result, { status: result.status === "FAILED" ? 500 : 200 });
@@ -34,10 +35,13 @@ export async function GET(request: NextRequest) {
   }
 }
 
-/** サイドバーの「データ手動更新」ボタンから呼び出される手動同期 (既定の呼び出し上限つき) */
-export async function POST() {
+/** サイドバーの「データ手動更新」ボタンから呼び出される手動同期 (既定の呼び出し上限つき)。
+ *  `?catalog=1` で物件カタログ (実績・料金設定等) のみ即時再取得する。 */
+export async function POST(request: NextRequest) {
   try {
-    const result = await runChunkedSync("manual_refresh");
+    const result = await runChunkedSync("manual_refresh", {
+      catalogOnly: request.nextUrl.searchParams.get("catalog") === "1",
+    });
     return NextResponse.json(result, { status: result.status === "FAILED" ? 500 : 200 });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

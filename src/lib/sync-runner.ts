@@ -9,6 +9,8 @@ export interface SyncRunOptions {
   reset?: boolean;
   /** データは保持しつつ全物件を「要更新」扱いにする (呼び出し上限なし) */
   force?: boolean;
+  /** 物件カタログ (検索) のみ即時再取得し、料金カレンダーは取得しない */
+  catalogOnly?: boolean;
   /** このチェーンで残っている料金取得の上限 (チェーン継続用。undefined=設定値) */
   cap?: number | null;
 }
@@ -44,6 +46,13 @@ export async function runChunkedSync(
       status: "SKIPPED",
       message: "自動同期は設定画面でオフになっています (手動更新は利用可能です)",
     };
+  }
+
+  if (opts.catalogOnly) {
+    console.log("AirROI sync: カタログのみ即時更新します (料金カレンダーは対象外)");
+    await db.execute("DELETE FROM sync_state WHERE key LIKE 'catalog:%'");
+    const result = await syncStep(db, syncType, 0, config);
+    return result;
   }
 
   if (opts.reset) {

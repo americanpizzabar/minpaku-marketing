@@ -42,6 +42,7 @@ export default function SettingsPanel() {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [catalogRefreshing, setCatalogRefreshing] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [configured, setConfigured] = useState(true);
   const [tracked, setTracked] = useState<number | null>(null);
@@ -65,6 +66,30 @@ export default function SettingsPanel() {
       .catch(() => setMessage("設定の読み込みに失敗しました"))
       .finally(() => setLoading(false));
   }, [open, form]);
+
+  const refreshCatalog = async () => {
+    if (!window.confirm("全エリアの物件カタログを再検索します (APIコスト 約$25)。実行しますか?")) {
+      return;
+    }
+    setCatalogRefreshing(true);
+    setMessage(null);
+    try {
+      const res = await fetch("/api/sync?catalog=1", { method: "POST" });
+      const json = await res.json();
+      if (json.status === "SUCCESS" || json.status === "PARTIAL") {
+        setMessage(
+          `物件情報を更新しました (検索${json.searchCalls ?? 0}回 / 約$${json.estimatedCostUsd ?? 0})`,
+        );
+        router.refresh();
+      } else {
+        setMessage(json.message ?? json.error ?? "更新に失敗しました");
+      }
+    } catch {
+      setMessage("更新リクエストに失敗しました");
+    } finally {
+      setCatalogRefreshing(false);
+    }
+  };
 
   const save = async () => {
     if (!form) return;
@@ -259,6 +284,17 @@ export default function SettingsPanel() {
               >
                 {saving ? "保存中..." : "設定を保存"}
               </button>
+
+              <button
+                onClick={refreshCatalog}
+                disabled={catalogRefreshing}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:border-indigo-400 hover:text-indigo-700 disabled:opacity-50"
+              >
+                {catalogRefreshing ? "更新中... (1〜2分)" : "物件情報を今すぐ更新 (約$25)"}
+              </button>
+              <p className="-mt-1 text-[11px] text-slate-400">
+                全エリアを再検索し、実績 (過去90日/12ヶ月)・清掃料・アメニティ等の詳細情報を取得します
+              </p>
             </>
           )}
           {message && <p className="text-xs text-slate-500">{message}</p>}

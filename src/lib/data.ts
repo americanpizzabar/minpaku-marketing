@@ -97,7 +97,15 @@ async function loadFromTurso(
   await schemaReady;
 
   const [propsRes, metricsRes, luminaRes, pacingRes, syncRes, luminaCfgRes] = await Promise.all([
-    db.execute("SELECT * FROM properties"),
+    // details_json は重いため一覧取得では読まない (物件詳細APIでのみ取得)
+    db.execute(
+      `SELECT id, airroi_id, airbnb_id, title, area, latitude, longitude, property_type,
+              max_guests, bedrooms, bathrooms, area_sqm, rating, reviews_count, url,
+              cleaning_fee, superhost, instant_book, guest_favorite, beds, host_name,
+              l90d_occupancy, l90d_avg_rate, l90d_revpar,
+              ttm_occupancy, ttm_avg_rate, ttm_revpar
+       FROM properties`,
+    ),
     db.execute({
       sql: "SELECT property_id, target_date, price_jpy, is_available, min_nights FROM daily_metrics WHERE target_date BETWEEN ? AND ?",
       args: [start, end],
@@ -154,6 +162,18 @@ async function loadFromTurso(
       rating: r.rating !== null ? Number(r.rating) : null,
       reviewsCount: Number(r.reviews_count ?? 0),
       url: r.url ? String(r.url) : null,
+      cleaningFee: r.cleaning_fee != null ? Number(r.cleaning_fee) : null,
+      superhost: r.superhost != null ? Boolean(Number(r.superhost)) : null,
+      instantBook: r.instant_book != null ? Boolean(Number(r.instant_book)) : null,
+      guestFavorite: r.guest_favorite != null ? Boolean(Number(r.guest_favorite)) : null,
+      beds: r.beds != null ? Number(r.beds) : null,
+      hostName: r.host_name ? String(r.host_name) : null,
+      l90dOccupancy: r.l90d_occupancy != null ? Number(r.l90d_occupancy) : null,
+      l90dAvgRate: r.l90d_avg_rate != null ? Number(r.l90d_avg_rate) : null,
+      l90dRevpar: r.l90d_revpar != null ? Number(r.l90d_revpar) : null,
+      ttmOccupancy: r.ttm_occupancy != null ? Number(r.ttm_occupancy) : null,
+      ttmAvgRate: r.ttm_avg_rate != null ? Number(r.ttm_avg_rate) : null,
+      ttmRevpar: r.ttm_revpar != null ? Number(r.ttm_revpar) : null,
     })),
     metrics: metricsRes.rows.map((r) => toMetric(r as Record<string, unknown>)),
     lumina: luminaRes.rows.map((r) => ({

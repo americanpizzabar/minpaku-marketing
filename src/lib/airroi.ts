@@ -248,13 +248,39 @@ async function refreshAreaCatalog(
       const sqft = num(pick(item, ["square_feet", "sq_ft", "sqft", "listing_size"]));
       if (sqft !== null && sqft > 0) areaSqm = Math.round(sqft * 0.092903 * 10) / 10;
     }
+    // 稼働率は 0-1 / 0-100 のどちらで返っても %表記 (0-100) に正規化する
+    const occPct = (v: unknown): number | null => {
+      const n = num(v);
+      if (n === null) return null;
+      return Math.round((n <= 1 ? n * 100 : n) * 10) / 10;
+    };
+    const bool01 = (v: unknown): number | null =>
+      v === undefined || v === null ? null : v ? 1 : 0;
     stmts.push({
-      sql: `INSERT INTO properties (id, airroi_id, airbnb_id, title, area, latitude, longitude, property_type, max_guests, bedrooms, bathrooms, area_sqm, rating, reviews_count, url, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      sql: `INSERT INTO properties (
+              id, airroi_id, airbnb_id, title, area, latitude, longitude, property_type,
+              max_guests, bedrooms, bathrooms, area_sqm, rating, reviews_count, url,
+              cleaning_fee, extra_guest_fee, superhost, instant_book, professional_management,
+              guest_favorite, beds, host_name, cover_photo_url,
+              l90d_occupancy, l90d_avg_rate, l90d_revpar, l90d_revenue,
+              ttm_occupancy, ttm_avg_rate, ttm_revpar, ttm_revenue, ttm_avg_length_of_stay,
+              details_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(id) DO UPDATE SET
               title=excluded.title, rating=excluded.rating, reviews_count=excluded.reviews_count,
               max_guests=excluded.max_guests, bedrooms=excluded.bedrooms,
               area_sqm=COALESCE(excluded.area_sqm, properties.area_sqm),
+              cleaning_fee=excluded.cleaning_fee, extra_guest_fee=excluded.extra_guest_fee,
+              superhost=excluded.superhost, instant_book=excluded.instant_book,
+              professional_management=excluded.professional_management,
+              guest_favorite=excluded.guest_favorite, beds=excluded.beds,
+              host_name=excluded.host_name, cover_photo_url=excluded.cover_photo_url,
+              l90d_occupancy=excluded.l90d_occupancy, l90d_avg_rate=excluded.l90d_avg_rate,
+              l90d_revpar=excluded.l90d_revpar, l90d_revenue=excluded.l90d_revenue,
+              ttm_occupancy=excluded.ttm_occupancy, ttm_avg_rate=excluded.ttm_avg_rate,
+              ttm_revpar=excluded.ttm_revpar, ttm_revenue=excluded.ttm_revenue,
+              ttm_avg_length_of_stay=excluded.ttm_avg_length_of_stay,
+              details_json=excluded.details_json,
               updated_at=CURRENT_TIMESTAMP`,
       args: [
         `airroi_${airroiId}`,
@@ -272,6 +298,25 @@ async function refreshAreaCatalog(
         num(pick(item, ["rating_overall", "rating", "overall_rating", "review_score"])),
         num(pick(item, ["num_reviews", "reviews_count", "number_of_reviews", "review_count"])) ?? 0,
         `https://www.airbnb.com/rooms/${airroiId}`,
+        num(item.cleaning_fee),
+        num(item.extra_guest_fee),
+        bool01(item.superhost),
+        bool01(item.instant_book),
+        bool01(item.professional_management),
+        bool01(item.guest_favorite),
+        num(item.beds),
+        item.host_name != null ? String(item.host_name) : null,
+        item.cover_photo_url != null ? String(item.cover_photo_url) : null,
+        occPct(item.l90d_occupancy),
+        num(item.l90d_avg_rate),
+        num(item.l90d_revpar),
+        num(item.l90d_revenue),
+        occPct(item.ttm_occupancy),
+        num(item.ttm_avg_rate),
+        num(item.ttm_revpar),
+        num(item.ttm_revenue),
+        num(item.ttm_avg_length_of_stay),
+        JSON.stringify(raw),
       ],
     });
   }

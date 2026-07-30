@@ -68,6 +68,18 @@ export function generateDemoProperties(count = 72): Property[] {
       rating: Math.round((4.2 + rand() * 0.75) * 100) / 100,
       reviewsCount: Math.floor(rand() * 280),
       url: `https://www.airbnb.jp/rooms/${50000000 + i * 7}`,
+      cleaningFee: Math.round((5000 + rand() * 12000) / 500) * 500,
+      superhost: rand() < 0.3,
+      instantBook: rand() < 0.5,
+      guestFavorite: rand() < 0.2,
+      beds: bedrooms + Math.floor(rand() * 3),
+      hostName: `ホスト${i + 1}`,
+      l90dOccupancy: Math.round((35 + rand() * 50) * 10) / 10,
+      l90dAvgRate: Math.round(TYPE_CONFIG[type].basePrice * (0.85 + rand() * 0.3)),
+      l90dRevpar: null,
+      ttmOccupancy: Math.round((30 + rand() * 50) * 10) / 10,
+      ttmAvgRate: Math.round(TYPE_CONFIG[type].basePrice * (0.8 + rand() * 0.3)),
+      ttmRevpar: null,
     });
   }
   return props;

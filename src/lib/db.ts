@@ -101,6 +101,30 @@ export const SCHEMA_SQL = [
   )`,
 ];
 
+// 増分マイグレーションで properties に追加する列 (存在すればスキップ)
+const PROPERTY_EXTRA_COLUMNS: [string, string][] = [
+  ["area_sqm", "REAL"],
+  ["cleaning_fee", "REAL"],
+  ["extra_guest_fee", "REAL"],
+  ["superhost", "INTEGER"],
+  ["instant_book", "INTEGER"],
+  ["professional_management", "INTEGER"],
+  ["guest_favorite", "INTEGER"],
+  ["beds", "INTEGER"],
+  ["host_name", "TEXT"],
+  ["cover_photo_url", "TEXT"],
+  ["l90d_occupancy", "REAL"],
+  ["l90d_avg_rate", "REAL"],
+  ["l90d_revpar", "REAL"],
+  ["l90d_revenue", "REAL"],
+  ["ttm_occupancy", "REAL"],
+  ["ttm_avg_rate", "REAL"],
+  ["ttm_revpar", "REAL"],
+  ["ttm_revenue", "REAL"],
+  ["ttm_avg_length_of_stay", "REAL"],
+  ["details_json", "TEXT"],
+];
+
 export async function ensureSchema(db: Client): Promise<void> {
   for (const sql of SCHEMA_SQL) {
     await db.execute(sql);
@@ -120,11 +144,12 @@ export async function ensureSchema(db: Client): Promise<void> {
   } catch {
     // 列が既に存在する場合は何もしない
   }
-  // 増分マイグレーション: 部屋面積 (m²)
-  try {
-    await db.execute("ALTER TABLE properties ADD COLUMN area_sqm REAL");
-  } catch {
-    // 列が既に存在する場合は何もしない
+  for (const [name, type] of PROPERTY_EXTRA_COLUMNS) {
+    try {
+      await db.execute(`ALTER TABLE properties ADD COLUMN ${name} ${type}`);
+    } catch {
+      // 列が既に存在する場合は何もしない
+    }
   }
   // 一度きり: 全物件の同期時刻が同一だと更新周期後に一斉失効するため、
   // 時刻をランダムに過去へ散らして日々の更新件数 (=APIコスト) を平準化する

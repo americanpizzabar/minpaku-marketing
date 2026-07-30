@@ -2,8 +2,9 @@
 
 import { useMemo, useState } from "react";
 import { PROPERTY_TYPES, type PropertyRow } from "@/lib/types";
+import PropertyDetailModal from "./PropertyDetailModal";
 
-type SortKey = "title" | "area" | "bedrooms" | "maxGuests" | "areaSqm" | "occupancyRate" | "adr" | "pricePerGuest" | "minNights" | "rating";
+type SortKey = "title" | "area" | "bedrooms" | "maxGuests" | "areaSqm" | "occupancyRate" | "adr" | "pricePerGuest" | "minNights" | "l90dOccupancy" | "l90dAvgRate" | "rating";
 
 const typeLabel = (value: string) =>
   PROPERTY_TYPES.find((t) => t.value === value)?.label ?? value;
@@ -20,6 +21,10 @@ function toCsv(rows: PropertyRow[]): string {
     "ADR(円)",
     "1人当たり単価(円)",
     "最低泊数",
+    "実績稼働率90日(%)",
+    "実績単価90日(円)",
+    "清掃料(円)",
+    "スーパーホスト",
     "評価",
     "レビュー数",
     "AirROI ID",
@@ -37,6 +42,10 @@ function toCsv(rows: PropertyRow[]): string {
       r.adr,
       r.pricePerGuest,
       r.minNights,
+      r.l90dOccupancy ?? "",
+      r.l90dAvgRate ?? "",
+      r.cleaningFee ?? "",
+      r.superhost === null ? "" : r.superhost ? "1" : "0",
       r.rating ?? "",
       r.reviewsCount,
       r.airroiId,
@@ -50,6 +59,7 @@ export default function PropertyTable({ rows }: { rows: PropertyRow[] }) {
   const [sortKey, setSortKey] = useState<SortKey>("adr");
   const [sortDesc, setSortDesc] = useState(true);
   const [query, setQuery] = useState("");
+  const [detail, setDetail] = useState<PropertyRow | null>(null);
 
   const sorted = useMemo(() => {
     const filtered = query
@@ -130,9 +140,11 @@ export default function PropertyTable({ rows }: { rows: PropertyRow[] }) {
               {th("ADR", "adr")}
               {th("1人単価", "pricePerGuest")}
               {th("最低泊数", "minNights")}
+              {th("実稼働90日", "l90dOccupancy")}
+              {th("実単価90日", "l90dAvgRate")}
               {th("評価", "rating")}
               <th className="px-3 py-2 text-right text-xs font-semibold whitespace-nowrap text-slate-500">
-                AirROI ID
+                詳細
               </th>
             </tr>
           </thead>
@@ -173,14 +185,28 @@ export default function PropertyTable({ rows }: { rows: PropertyRow[] }) {
                 </td>
                 <td className="px-3 py-2 text-right text-slate-600">{r.minNights}泊</td>
                 <td className="px-3 py-2 text-right text-slate-600">
+                  {r.l90dOccupancy != null ? `${r.l90dOccupancy.toFixed(1)}%` : "—"}
+                </td>
+                <td className="px-3 py-2 text-right text-slate-600">
+                  {r.l90dAvgRate != null ? `¥${r.l90dAvgRate.toLocaleString("ja-JP")}` : "—"}
+                </td>
+                <td className="px-3 py-2 text-right whitespace-nowrap text-slate-600">
+                  {r.superhost ? "⭐" : ""}
                   {r.rating != null ? `★${r.rating.toFixed(2)}` : "—"}
                 </td>
-                <td className="px-3 py-2 text-right text-xs text-slate-400">{r.airroiId}</td>
+                <td className="px-3 py-2 text-right">
+                  <button
+                    onClick={() => setDetail(r)}
+                    className="rounded-lg border border-slate-300 px-2 py-1 text-xs font-medium text-slate-600 transition hover:border-indigo-400 hover:text-indigo-600"
+                  >
+                    詳細
+                  </button>
+                </td>
               </tr>
             ))}
             {sorted.length === 0 && (
               <tr>
-                <td colSpan={12} className="px-3 py-8 text-center text-sm text-slate-400">
+                <td colSpan={14} className="px-3 py-8 text-center text-sm text-slate-400">
                   条件に一致する物件がありません。フィルタを緩めてください。
                 </td>
               </tr>
@@ -188,6 +214,13 @@ export default function PropertyTable({ rows }: { rows: PropertyRow[] }) {
           </tbody>
         </table>
       </div>
+      {detail && (
+        <PropertyDetailModal
+          propertyId={detail.id}
+          title={detail.title}
+          onClose={() => setDetail(null)}
+        />
+      )}
     </div>
   );
 }

@@ -45,6 +45,8 @@ export interface SyncConfig {
   luminaBedrooms: number; // 自物件の寝室数 (API未収録時の表示用)
   luminaMaxGuests: number; // 自物件の定員 (API未収録時の表示用)
   luminaOccupancy: number | null; // 自物件の稼働率 (%表記, API未収録時に使用, null=未設定)
+  luminaLat: number | null; // 自物件の緯度 (地図マーカー位置, null=未設定)
+  luminaLng: number | null; // 自物件の経度
 }
 
 /** Webアプリの設定画面で保存された値 (sync_state) を環境変数既定値とマージして返す */
@@ -72,6 +74,14 @@ export async function getSyncConfig(db: Client): Promise<SyncConfig> {
       const n = Number(v);
       return Number.isFinite(n) && n >= 0 && n <= 100 ? n : null;
     })(),
+    luminaLat: (() => {
+      const n = Number(map.get("config:lumina_lat"));
+      return Number.isFinite(n) && n !== 0 ? n : null;
+    })(),
+    luminaLng: (() => {
+      const n = Number(map.get("config:lumina_lng"));
+      return Number.isFinite(n) && n !== 0 ? n : null;
+    })(),
   };
 }
 
@@ -94,6 +104,10 @@ export async function saveSyncConfig(db: Client, config: Partial<SyncConfig>): P
     entries.push(["config:lumina_max_guests", String(config.luminaMaxGuests)]);
   if (config.luminaOccupancy !== undefined)
     entries.push(["config:lumina_occupancy", config.luminaOccupancy === null ? "" : String(config.luminaOccupancy)]);
+  if (config.luminaLat !== undefined)
+    entries.push(["config:lumina_lat", config.luminaLat === null ? "" : String(config.luminaLat)]);
+  if (config.luminaLng !== undefined)
+    entries.push(["config:lumina_lng", config.luminaLng === null ? "" : String(config.luminaLng)]);
   for (const [key, value] of entries) {
     await db.execute({
       sql: `INSERT INTO sync_state (key, value) VALUES (?, ?)

@@ -32,6 +32,13 @@ export async function GET(request: NextRequest) {
       if (!Number.isFinite(n)) return undefined;
       return Math.max(min, Math.min(max, Math.round(n)));
     };
+    const floatParam = (name: string, min: number, max: number): number | null | undefined => {
+      const v = params.get(name);
+      if (v === null) return undefined;
+      if (v === "" || v === "none") return null;
+      const n = Number(v);
+      return Number.isFinite(n) && n >= min && n <= max ? n : undefined;
+    };
     const autoSyncParam = params.get("autoSync");
     await saveSyncConfig(db, {
       autoSync: autoSyncParam === null ? undefined : autoSyncParam !== "0",
@@ -44,6 +51,8 @@ export async function GET(request: NextRequest) {
       luminaMaxGuests: numParam("luminaMaxGuests", 1, 50),
       luminaOccupancy:
         params.get("luminaOccupancy") === "none" ? null : numParam("luminaOccupancy", 0, 100),
+      luminaLat: floatParam("luminaLat", 20, 46),
+      luminaLng: floatParam("luminaLng", 122, 154),
     });
     if (params.get("luminaListingId") !== null || params.get("luminaBasePrice") !== null) {
       await db.execute("DELETE FROM sync_state WHERE key = 'lumina_rates_at'");
@@ -92,6 +101,13 @@ export async function POST(request: NextRequest) {
     if (!Number.isFinite(n)) return undefined;
     return Math.max(min, Math.min(max, Math.round(n)));
   };
+  // 緯度・経度用: 小数を丸めず、空文字/nullは「未設定に戻す」として扱う
+  const floatField = (v: unknown, min: number, max: number): number | null | undefined => {
+    if (v === undefined) return undefined;
+    if (v === null || v === "") return null;
+    const n = Number(v);
+    return Number.isFinite(n) && n >= min && n <= max ? n : undefined;
+  };
 
   const luminaListingId =
     typeof body.luminaListingId === "string"
@@ -115,6 +131,8 @@ export async function POST(request: NextRequest) {
           ? null
           : numField(body.luminaOccupancy, 0, 100)
         : undefined,
+    luminaLat: floatField(body.luminaLat, 20, 46),
+    luminaLng: floatField(body.luminaLng, 122, 154),
   });
 
   const config = await getSyncConfig(db);

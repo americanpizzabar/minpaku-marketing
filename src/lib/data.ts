@@ -13,6 +13,8 @@ export interface LuminaProfile {
   occupancyOverride: number | null; // %表記。API未収録時に設定画面の値を使用
   source: "api" | "manual" | "demo"; // luminaメトリクスの出所
   listingId: string | null; // 自物件のAirbnbリスティングID (リンク表示用)
+  lat: number | null; // 自物件の緯度 (設定画面で指定, 地図マーカー用)
+  lng: number | null;
 }
 
 export interface Dataset {
@@ -76,6 +78,8 @@ export async function loadDataset(
       occupancyOverride: null,
       source: "demo",
       listingId: null,
+      lat: null,
+      lng: null,
     },
     dataSource: "demo",
     lastSyncedAt: null,
@@ -189,6 +193,8 @@ async function loadFromTurso(
       occupancyOverride: cfgNum("config:lumina_occupancy"),
       source: luminaSource === "api" ? "api" : "manual",
       listingId: luminaCfg.get("config:lumina_listing_id") || null,
+      lat: cfgNum("config:lumina_lat"),
+      lng: cfgNum("config:lumina_lng"),
     },
     dataSource: "turso",
     lastSyncedAt: syncRes.rows[0] ? String(syncRes.rows[0].created_at) : null,

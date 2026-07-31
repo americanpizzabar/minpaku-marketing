@@ -213,13 +213,14 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
       l90dAvgRate: null,
       isLumina: true,
     });
-    // 地図用の自物件マーカー (正確な座標は未取得のため山中湖村の中心を目安表示)
+    // 地図用の自物件マーカー (設定画面の緯度・経度を優先、未設定時は山中湖村中心を目安表示)
+    const hasExactLocation = lp.lat !== null && lp.lng !== null;
     mapPoints.push({
       id: "lumina",
-      title: `${LUMINA_PROFILE.title} (位置は目安)`,
+      title: hasExactLocation ? LUMINA_PROFILE.title : `${LUMINA_PROFILE.title} (位置は目安)`,
       area: LUMINA_PROFILE.area,
-      lat: 35.4167,
-      lng: 138.8667,
+      lat: lp.lat ?? 35.4167,
+      lng: lp.lng ?? 138.8667,
       adr: Math.round(luminaAdr),
       occupancyRate: Math.round(luminaOcc * 1000) / 10,
       pricePerGuest: Math.round(luminaAdr / Math.max(lp.maxGuests, 1)),

@@ -168,7 +168,7 @@ export default function MapPanel({ points }: { points: MapPoint[] }) {
           </div>
           <p className="mt-1 flex items-center gap-1 text-slate-500">
             <span className="inline-block h-3 w-3 rounded-full border-2 border-rose-700 bg-rose-500" />
-            Lumina Fuji (位置は目安)
+            Lumina Fuji
           </p>
         </div>
       </div>

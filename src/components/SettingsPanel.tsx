@@ -13,6 +13,8 @@ interface SettingsState {
   luminaBedrooms: number;
   luminaMaxGuests: number;
   luminaOccupancy: number | ""; // "" = 未設定
+  luminaLat: string; // 文字列で保持 ("" = 未設定)
+  luminaLng: string;
 }
 
 function toFormState(config: Record<string, unknown>): SettingsState {
@@ -29,6 +31,8 @@ function toFormState(config: Record<string, unknown>): SettingsState {
       config.luminaOccupancy === null || config.luminaOccupancy === undefined
         ? ""
         : Number(config.luminaOccupancy),
+    luminaLat: config.luminaLat == null ? "" : String(config.luminaLat),
+    luminaLng: config.luminaLng == null ? "" : String(config.luminaLng),
   };
 }
 
@@ -102,6 +106,8 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
         body: JSON.stringify({
           ...form,
           luminaOccupancy: form.luminaOccupancy === "" ? null : form.luminaOccupancy,
+          luminaLat: form.luminaLat.trim() === "" ? null : Number(form.luminaLat),
+          luminaLng: form.luminaLng.trim() === "" ? null : Number(form.luminaLng),
         }),
       });
       const json = await res.json();
@@ -243,6 +249,30 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                         onChange={(e) =>
                           setForm({ ...form, luminaMaxGuests: Number(e.target.value) || 1 })
                         }
+                      />
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <div className="flex-1">
+                      <label className={labelClass}>緯度 (地図マーカー)</label>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        className={inputClass}
+                        value={form.luminaLat}
+                        onChange={(e) => setForm({ ...form, luminaLat: e.target.value })}
+                        placeholder="例: 35.4130"
+                      />
+                    </div>
+                    <div className="flex-1">
+                      <label className={labelClass}>経度</label>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        className={inputClass}
+                        value={form.luminaLng}
+                        onChange={(e) => setForm({ ...form, luminaLng: e.target.value })}
+                        placeholder="例: 138.8760"
                       />
                     </div>
                   </div>

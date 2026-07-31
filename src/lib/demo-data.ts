@@ -80,6 +80,7 @@ export function generateDemoProperties(count = 72): Property[] {
       ttmOccupancy: Math.round((30 + rand() * 50) * 10) / 10,
       ttmAvgRate: Math.round(TYPE_CONFIG[type].basePrice * (0.8 + rand() * 0.3)),
       ttmRevpar: null,
+      ttmAvgLos: Math.round((1.2 + rand() * 1.6) * 10) / 10,
     });
   }
   return props;

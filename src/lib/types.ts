@@ -95,6 +95,7 @@ export interface Property {
   ttmOccupancy: number | null;
   ttmAvgRate: number | null;
   ttmRevpar: number | null;
+  ttmAvgLos: number | null; // 過去12ヶ月の平均滞在日数
 }
 
 export interface DailyMetric {
@@ -124,6 +125,18 @@ export interface Kpis {
   propertiesCount: number;
   luminaAdr: number | null;
   luminaOccupancy: number | null;
+  // ---- ハイエンド層 (ADR上位20%) ----
+  top20Adr: number;
+  top20Revpar: number;
+  top20Count: number;
+  // ---- 滞在・泊数 ----
+  alos: number | null; // 平均滞在日数 (AirROI過去12ヶ月実績, データ未取得ならnull)
+  minStay2PlusShare: number; // 0-1: 最低2泊以上を主条件とする物件の比率
+  minStayDist: { n1: number; n2: number; n3plus: number }; // 最低泊数の物件数分布
+  // ---- 週末プレミアム ----
+  weekendPremium: number | null; // % (休前日ADR ÷ 平日ADR - 1) × 100
+  weekdayAdr: number;
+  preholidayAdr: number;
 }
 
 export interface ScatterPoint {

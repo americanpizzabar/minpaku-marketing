@@ -242,6 +242,41 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
     return target.filter((m) => !m.isAvailable).length / target.length;
   };
 
+  // ---- ハイエンド層 (ADR上位20%) の ADR / RevPAR ----
+  const adrOccPairs = adrs
+    .map((a, i) => ({ adr: a, occ: occs[i] }))
+    .sort((x, y) => y.adr - x.adr);
+  const top20Count = adrOccPairs.length > 0 ? Math.max(1, Math.ceil(adrOccPairs.length * 0.2)) : 0;
+  const top20 = adrOccPairs.slice(0, top20Count);
+
+  // ---- 平均滞在日数 (ALOS, AirROI過去12ヶ月実績) ----
+  const losVals = props
+    .map((p) => p.ttmAvgLos)
+    .filter((v): v is number => v !== null && v > 0);
+
+  // ---- 最低泊数分布 (期間内の最頻値ベース) ----
+  const minStayDist = {
+    n1: rows.filter((r) => r.minNights <= 1).length,
+    n2: rows.filter((r) => r.minNights === 2).length,
+    n3plus: rows.filter((r) => r.minNights >= 3).length,
+  };
+
+  // ---- 週末プレミアム (曜日タイプフィルタとは独立に、期間内の平日 vs 休前日で比較) ----
+  const weekdayPrices: number[] = [];
+  const preholidayPrices: number[] = [];
+  for (const m of ds.metrics) {
+    if (!propIds.has(m.propertyId)) continue;
+    if (!(m.priceJpy > 0 && m.priceJpy <= MAX_SANE_NIGHTLY)) continue;
+    if (matchesDayType(m.targetDate, "weekday")) weekdayPrices.push(m.priceJpy);
+    else if (matchesDayType(m.targetDate, "preholiday")) preholidayPrices.push(m.priceJpy);
+  }
+  const weekdayAdr = Math.round(avg(weekdayPrices));
+  const preholidayAdr = Math.round(avg(preholidayPrices));
+  const weekendPremium =
+    weekdayPrices.length > 0 && preholidayPrices.length > 0 && weekdayAdr > 0
+      ? Math.round((preholidayAdr / weekdayAdr - 1) * 1000) / 10
+      : null;
+
   const kpis: Kpis = {
     adr: Math.round(avg(adrs)),
     occupancyRate: avg(occs),
@@ -252,6 +287,16 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
     propertiesCount: props.length,
     luminaAdr: luminaAdr !== null ? Math.round(luminaAdr) : null,
     luminaOccupancy: luminaOcc,
+    top20Adr: Math.round(avg(top20.map((t) => t.adr))),
+    top20Revpar: Math.round(avg(top20.map((t) => t.adr * t.occ))),
+    top20Count,
+    alos: losVals.length > 0 ? Math.round(avg(losVals) * 10) / 10 : null,
+    minStay2PlusShare:
+      rows.length > 0 ? (minStayDist.n2 + minStayDist.n3plus) / rows.length : 0,
+    minStayDist,
+    weekendPremium,
+    weekdayAdr,
+    preholidayAdr,
   };
 
   // ---- 日別トレンド ----

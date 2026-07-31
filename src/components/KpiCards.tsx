@@ -39,8 +39,12 @@ export default function KpiCards({ kpis }: { kpis: Kpis }) {
       ? ((kpis.luminaAdr - kpis.adr) / kpis.adr) * 100
       : null;
 
+  const dist = kpis.minStayDist;
+  const distTotal = dist.n1 + dist.n2 + dist.n3plus;
+  const pct = (n: number) => (distTotal > 0 ? Math.round((n / distTotal) * 100) : 0);
+
   return (
-    <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+    <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
       <Card
         label="平均客室単価 (ADR)"
         value={formatJpy(kpis.adr)}
@@ -71,6 +75,35 @@ export default function KpiCards({ kpis }: { kpis: Kpis }) {
             : "自社データ未登録"
         }
         accent={luminaDiff !== null ? (luminaDiff >= 0 ? "up" : "down") : null}
+      />
+      <Card
+        label="上位20% ADR (ハイエンド層)"
+        value={formatJpy(kpis.top20Adr)}
+        sub={`RevPAR ${formatJpy(kpis.top20Revpar)} / 上位${kpis.top20Count}物件`}
+      />
+      <Card
+        label="平均滞在日数 (ALOS)"
+        value={kpis.alos !== null ? `${kpis.alos}泊` : "—"}
+        sub={
+          kpis.alos !== null
+            ? "過去12ヶ月実績 (AirROI集計)"
+            : "設定の「物件情報を今すぐ更新」後に表示"
+        }
+      />
+      <Card
+        label="週末プレミアム"
+        value={
+          kpis.weekendPremium !== null
+            ? `${kpis.weekendPremium >= 0 ? "+" : ""}${kpis.weekendPremium.toFixed(1)}%`
+            : "—"
+        }
+        sub={`平日 ${formatJpy(kpis.weekdayAdr)} → 休前日 ${formatJpy(kpis.preholidayAdr)}`}
+        accent={kpis.weekendPremium !== null && kpis.weekendPremium > 0 ? "up" : null}
+      />
+      <Card
+        label="最低2泊以上の物件"
+        value={formatPercent(kpis.minStay2PlusShare)}
+        sub={`1泊OK ${pct(dist.n1)}% / 2泊 ${pct(dist.n2)}% / 3泊+ ${pct(dist.n3plus)}%`}
       />
     </div>
   );

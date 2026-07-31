@@ -107,7 +107,7 @@ async function loadFromTurso(
               max_guests, bedrooms, bathrooms, area_sqm, rating, reviews_count, url,
               cleaning_fee, superhost, instant_book, guest_favorite, beds, host_name,
               l90d_occupancy, l90d_avg_rate, l90d_revpar,
-              ttm_occupancy, ttm_avg_rate, ttm_revpar
+              ttm_occupancy, ttm_avg_rate, ttm_revpar, ttm_avg_length_of_stay
        FROM properties`,
     ),
     db.execute({
@@ -178,6 +178,7 @@ async function loadFromTurso(
       ttmOccupancy: r.ttm_occupancy != null ? Number(r.ttm_occupancy) : null,
       ttmAvgRate: r.ttm_avg_rate != null ? Number(r.ttm_avg_rate) : null,
       ttmRevpar: r.ttm_revpar != null ? Number(r.ttm_revpar) : null,
+      ttmAvgLos: r.ttm_avg_length_of_stay != null ? Number(r.ttm_avg_length_of_stay) : null,
     })),
     metrics: metricsRes.rows.map((r) => toMetric(r as Record<string, unknown>)),
     lumina: luminaRes.rows.map((r) => ({

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runChunkedSync } from "@/lib/sync-runner";
+import { refreshOneListing, runChunkedSync } from "@/lib/sync-runner";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -17,6 +17,19 @@ export async function GET(request: NextRequest) {
   }
 
   const params = request.nextUrl.searchParams;
+
+  // `listing=<airroi_id>`: 1物件だけ料金カレンダーを即時再取得 (異常データ修正用)
+  const listing = params.get("listing");
+  if (listing) {
+    try {
+      const result = await refreshOneListing(listing.replace(/\D/g, ""));
+      return NextResponse.json(result, { status: result.status === "FAILED" ? 404 : 200 });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return NextResponse.json({ status: "FAILED", error: message }, { status: 500 });
+    }
+  }
+
   const capParam = params.get("cap");
   const cap =
     capParam === null ? undefined : capParam === "none" ? null : Math.max(0, Number(capParam) || 0);

@@ -335,26 +335,52 @@ interface StaleProp {
   maxGuests: number;
 }
 
+/**
+ * 予約可能日の価格から外れ値の上限を求める。
+ * ホストが実質ブロック目的で設定する異常高額日 (中央値の8倍超, 例: ¥940万/泊) を
+ * 除外するため。下限10万円は安価な物件の正当な繁忙期価格を守るための床。
+ */
+function outlierCapOf(days: { available?: unknown; rate?: unknown }[]): number {
+  const positives = days
+    .filter((d) => Boolean(d.available))
+    .map((d) => num(d.rate))
+    .filter((n): n is number => n !== null && n > 0)
+    .sort((a, b) => a - b);
+  if (positives.length === 0) return Number.MAX_SAFE_INTEGER;
+  const median = positives[Math.floor(positives.length / 2)];
+  return Math.max(median * 8, 100_000);
+}
+
 /** 1物件の料金カレンダー (今後365日) を取得してUPSERTする */
-async function refreshRatesForProperty(db: Client, p: StaleProp): Promise<number> {
+export async function refreshRatesForProperty(db: Client, p: StaleProp): Promise<number> {
   const stmts: InStatement[] = [];
   try {
     const ratesRes = await airRoiGet<FutureRatesResponse>(
       `/listings/future/rates?id=${encodeURIComponent(p.airroiId)}&currency=native`,
     );
-    for (const day of ratesRes.rates ?? []) {
+    const days = ratesRes.rates ?? [];
+    const cap = outlierCapOf(days);
+    for (const day of days) {
       if (!day.date) continue;
       const rawPrice = num(day.rate);
       const available = Boolean(day.available);
       // 予約不可日の rate はAirbnbが返すダミー価格 (数百万円等) のため採用しない。
-      // 価格は「予約可能日の表示価格」のみ保存し、0 は価格情報なしを意味する。
-      const price = available && rawPrice !== null && rawPrice > 0 ? rawPrice : 0;
+      // 予約可能日でも外れ値上限 (中央値の8倍) を超える価格はブロック目的とみなし除外。
+      // 価格は 0 = 価格情報なしを意味する。
+      const price =
+        available && rawPrice !== null && rawPrice > 0 && rawPrice <= cap ? rawPrice : 0;
       stmts.push({
         sql: `INSERT INTO daily_metrics (property_id, target_date, price_jpy, price_per_person, is_available, min_nights, fetched_at)
               VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
               ON CONFLICT(property_id, target_date) DO UPDATE SET
-                price_jpy=CASE WHEN excluded.price_jpy > 0 THEN excluded.price_jpy ELSE daily_metrics.price_jpy END,
-                price_per_person=CASE WHEN excluded.price_jpy > 0 THEN excluded.price_per_person ELSE daily_metrics.price_per_person END,
+                price_jpy=CASE
+                  WHEN excluded.price_jpy > 0 THEN excluded.price_jpy
+                  WHEN daily_metrics.price_jpy > ? THEN 0
+                  ELSE daily_metrics.price_jpy END,
+                price_per_person=CASE
+                  WHEN excluded.price_jpy > 0 THEN excluded.price_per_person
+                  WHEN daily_metrics.price_jpy > ? THEN 0
+                  ELSE daily_metrics.price_per_person END,
                 is_available=excluded.is_available, min_nights=excluded.min_nights,
                 fetched_at=CURRENT_TIMESTAMP`,
         args: [
@@ -364,6 +390,9 @@ async function refreshRatesForProperty(db: Client, p: StaleProp): Promise<number
           price / Math.max(p.maxGuests, 1),
           available ? 1 : 0,
           num(day.min_nights) ?? 1,
+          // 過去の同期で保存済みの外れ値価格も上限超過なら掃除する
+          cap,
+          cap,
         ],
       });
     }
@@ -414,11 +443,13 @@ export async function refreshLuminaRates(
       `/listings/future/rates?id=${encodeURIComponent(config.luminaListingId)}&currency=native`,
     );
     usedApi = true;
+    const luminaCap = outlierCapOf(ratesRes.rates ?? []);
     for (const day of ratesRes.rates ?? []) {
       if (!day.date) continue;
       const rawPrice = num(day.rate);
       const available = Boolean(day.available);
-      const price = available && rawPrice !== null && rawPrice > 0 ? rawPrice : 0;
+      const price =
+        available && rawPrice !== null && rawPrice > 0 && rawPrice <= luminaCap ? rawPrice : 0;
       stmts.push({
         sql: `INSERT INTO lumina_fuji_metrics (target_date, configured_price, is_booked)
               VALUES (?, ?, ?)

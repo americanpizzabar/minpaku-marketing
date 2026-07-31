@@ -1,5 +1,10 @@
 import { waitUntil } from "@vercel/functions";
-import { getSyncConfig, syncStep, type SyncStepResult } from "./airroi";
+import {
+  getSyncConfig,
+  refreshRatesForProperty,
+  syncStep,
+  type SyncStepResult,
+} from "./airroi";
 import { ensureSchema, getDb } from "./db";
 
 export type SyncRunResult = SyncStepResult | { status: "SKIPPED"; message: string };
@@ -79,6 +84,29 @@ export async function runChunkedSync(
   }
 
   return result;
+}
+
+/** 指定した1物件だけ料金カレンダーを即時再取得する (異常データの修正・診断用, $0.10) */
+export async function refreshOneListing(
+  listingId: string,
+): Promise<{ status: string; recordsFetched?: number; error?: string }> {
+  const db = getDb();
+  if (!db) return { status: "SKIPPED", error: "デモモードのため実行できません" };
+  await ensureSchema(db);
+
+  const res = await db.execute({
+    sql: "SELECT id, airroi_id, max_guests FROM properties WHERE airroi_id = ? OR id = ?",
+    args: [listingId, listingId],
+  });
+  const row = res.rows[0];
+  if (!row) return { status: "FAILED", error: `物件 ${listingId} が見つかりません` };
+
+  const records = await refreshRatesForProperty(db, {
+    id: String(row.id),
+    airroiId: String(row.airroi_id),
+    maxGuests: Number(row.max_guests) || 1,
+  });
+  return { status: "SUCCESS", recordsFetched: records };
 }
 
 /** 残作業の処理を新しい関数インスタンスに引き継ぐ (リクエスト送信のみ保証し応答は待たない) */

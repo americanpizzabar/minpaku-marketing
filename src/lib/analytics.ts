@@ -23,6 +23,9 @@ function avg(nums: number[]): number {
   return nums.reduce((a, b) => a + b, 0) / nums.length;
 }
 
+// 集計時のセーフティネット: この市場で¥200万/泊超は実在しない (ブロック目的の異常価格)
+const MAX_SANE_NIGHTLY = 2_000_000;
+
 function percentile(sorted: number[], p: number): number {
   if (sorted.length === 0) return 0;
   const idx = Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length));
@@ -100,7 +103,7 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
       statsMap.set(m.propertyId, s);
     }
     // price_jpy=0 は価格情報なし (予約済み日はダミー価格のため保存していない)
-    if (m.priceJpy > 0) s.prices.push(m.priceJpy);
+    if (m.priceJpy > 0 && m.priceJpy <= MAX_SANE_NIGHTLY) s.prices.push(m.priceJpy);
     s.total += 1;
     if (!m.isAvailable) s.booked += 1;
     const mn = m.minNights > 0 ? m.minNights : 1;
@@ -258,7 +261,7 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
       d = { prices: [], booked: 0, total: 0 };
       byDate.set(m.targetDate, d);
     }
-    if (m.priceJpy > 0) d.prices.push(m.priceJpy);
+    if (m.priceJpy > 0 && m.priceJpy <= MAX_SANE_NIGHTLY) d.prices.push(m.priceJpy);
     d.total += 1;
     if (!m.isAvailable) d.booked += 1;
   }

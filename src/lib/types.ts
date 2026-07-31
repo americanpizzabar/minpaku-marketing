@@ -41,7 +41,7 @@ export const CAPACITY_BUCKETS = [
 
 export interface Filters {
   areas: string[]; // 空配列 = 全エリア (複数選択可)
-  propertyType: string; // "all" or PropertyType
+  propertyTypes: string[]; // 空配列 = 全形態 (複数選択可)
   priceMin: number | null;
   priceMax: number | null;
   capacity: string; // "all" or bucket value
@@ -54,7 +54,7 @@ export interface Filters {
 
 export const DEFAULT_FILTERS: Filters = {
   areas: [],
-  propertyType: "all",
+  propertyTypes: [],
   priceMin: null,
   priceMax: null,
   capacity: "all",

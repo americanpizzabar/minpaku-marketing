@@ -37,9 +37,9 @@ const inputClass =
 const labelClass = "mb-1 block text-xs font-semibold text-slate-500";
 
 /** データ取得 (自動/手動・更新周期・コスト上限・自物件ID) の設定パネル */
-export default function SettingsPanel() {
+export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: boolean }) {
   const router = useRouter();
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(defaultOpen);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [catalogRefreshing, setCatalogRefreshing] = useState(false);

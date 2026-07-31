@@ -4,6 +4,7 @@ import { LUMINA_PROFILE } from "./demo-data";
 import {
   AREAS,
   CAPACITY_BUCKETS,
+  PROPERTY_TYPES,
   TIME_RANGES,
   type BenchmarkPoint,
   type CapacityBar,
@@ -34,7 +35,7 @@ function percentile(sorted: number[], p: number): number {
 
 function matchesFilters(p: Property, f: Filters): boolean {
   if (f.areas.length > 0 && !f.areas.includes(p.area)) return false;
-  if (f.propertyType !== "all" && p.propertyType !== f.propertyType) return false;
+  if (f.propertyTypes.length > 0 && !f.propertyTypes.includes(p.propertyType)) return false;
   if (f.capacity !== "all") {
     const bucket = CAPACITY_BUCKETS.find((b) => b.value === f.capacity);
     if (bucket && (p.maxGuests < bucket.min || p.maxGuests > bucket.max)) return false;
@@ -359,9 +360,14 @@ export function parseFilters(params: Record<string, string | string[] | undefine
     .split(",")
     .map((s) => s.trim())
     .filter((a) => (AREAS as readonly string[]).includes(a));
+  const typeValues = PROPERTY_TYPES.map((t) => t.value as string);
+  const propertyTypes = (get("type") ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((t) => typeValues.includes(t));
   return {
     areas,
-    propertyType: get("type") ?? "all",
+    propertyTypes,
     priceMin: num("priceMin"),
     priceMax: num("priceMax"),
     capacity: get("capacity") ?? "all",

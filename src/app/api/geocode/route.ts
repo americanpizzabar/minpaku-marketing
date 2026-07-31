@@ -18,6 +18,45 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "q (住所) を指定してください" }, { status: 400 });
   }
 
+  // provider=osm: Nominatim (OpenStreetMap) — 施設名・POI検索が可能
+  if (request.nextUrl.searchParams.get("provider") === "osm") {
+    try {
+      const res = await fetch(
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=jsonv2&limit=5&accept-language=ja`,
+        {
+          headers: {
+            Accept: "application/json",
+            "User-Agent": "minpaku-marketing-dashboard/1.0 (admin contact via site)",
+          },
+        },
+      );
+      if (!res.ok) {
+        return NextResponse.json({ error: `Nominatim Error: ${res.status}` }, { status: 502 });
+      }
+      const json = (await res.json()) as {
+        display_name?: string;
+        lat?: string;
+        lon?: string;
+        type?: string;
+      }[];
+      return NextResponse.json({
+        query: q,
+        provider: "osm",
+        results: json.map((r) => ({
+          title: r.display_name ?? "",
+          type: r.type ?? "",
+          lat: r.lat ? Number(r.lat) : null,
+          lng: r.lon ? Number(r.lon) : null,
+        })),
+      });
+    } catch (err) {
+      return NextResponse.json(
+        { error: err instanceof Error ? err.message : String(err) },
+        { status: 500 },
+      );
+    }
+  }
+
   try {
     const res = await fetch(
       `https://msearch.gsi.go.jp/address-search/AddressSearch?q=${encodeURIComponent(q)}`,

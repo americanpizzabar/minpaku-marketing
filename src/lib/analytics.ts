@@ -122,9 +122,6 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
   const propIds = new Set(props.map((p) => p.id));
 
   // ---- KPI ----
-  const adrs: number[] = [];
-  const occs: number[] = [];
-  const ppgs: number[] = [];
   const rows: PropertyRow[] = [];
   const scatter: ScatterPoint[] = [];
   const mapPoints: MapPoint[] = [];
@@ -133,9 +130,6 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
     const s = statsMap.get(p.id)!;
     const adr = avg(s.prices);
     const occ = s.total > 0 ? s.booked / s.total : 0;
-    adrs.push(adr);
-    occs.push(occ);
-    ppgs.push(adr / Math.max(p.maxGuests, 1));
     rows.push({
       id: p.id,
       airroiId: p.airroiId,
@@ -236,68 +230,84 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
 
   // Pacing KPI (今後30/60日、物件フィルタのみ適用)
   const pacing30End = toDateStr(addDays(today, 29));
-  const pacingOf = (metrics: DailyMetric[], endDate: string) => {
-    const target = metrics.filter((m) => propIds.has(m.propertyId) && m.targetDate <= endDate);
+  const pacingOf = (metrics: DailyMetric[], endDate: string, ids: Set<string>) => {
+    const target = metrics.filter((m) => ids.has(m.propertyId) && m.targetDate <= endDate);
     if (target.length === 0) return 0;
     return target.filter((m) => !m.isAvailable).length / target.length;
   };
 
-  // ---- ハイエンド層 (ADR上位20%) の ADR / RevPAR ----
-  const adrOccPairs = adrs
-    .map((a, i) => ({ adr: a, occ: occs[i] }))
-    .sort((x, y) => y.adr - x.adr);
-  const top20Count = adrOccPairs.length > 0 ? Math.max(1, Math.ceil(adrOccPairs.length * 0.2)) : 0;
-  const top20 = adrOccPairs.slice(0, top20Count);
+  /** 指定した物件サブセットで全KPIを計算する (全物件と上位20%の両方で使用) */
+  const kpisFor = (subsetRows: PropertyRow[]): Kpis => {
+    const ids = new Set(subsetRows.map((r) => r.id));
+    const subsetProps = props.filter((p) => ids.has(p.id));
+    const adrs = subsetRows.map((r) => r.adr);
+    const occs = subsetRows.map((r) => r.occupancyRate / 100);
+    const ppgs = subsetRows.map((r) => r.pricePerGuest);
 
-  // ---- 平均滞在日数 (ALOS, AirROI過去12ヶ月実績) ----
-  const losVals = props
-    .map((p) => p.ttmAvgLos)
-    .filter((v): v is number => v !== null && v > 0);
+    // サブセット内のさらにADR上位20%
+    const adrOccPairs = adrs
+      .map((a, i) => ({ adr: a, occ: occs[i] }))
+      .sort((x, y) => y.adr - x.adr);
+    const top20Count =
+      adrOccPairs.length > 0 ? Math.max(1, Math.ceil(adrOccPairs.length * 0.2)) : 0;
+    const top20 = adrOccPairs.slice(0, top20Count);
 
-  // ---- 最低泊数分布 (期間内の最頻値ベース) ----
-  const minStayDist = {
-    n1: rows.filter((r) => r.minNights <= 1).length,
-    n2: rows.filter((r) => r.minNights === 2).length,
-    n3plus: rows.filter((r) => r.minNights >= 3).length,
+    // 平均滞在日数 (ALOS, AirROI過去12ヶ月実績)
+    const losVals = subsetProps
+      .map((p) => p.ttmAvgLos)
+      .filter((v): v is number => v !== null && v > 0);
+
+    // 最低泊数分布 (期間内の最頻値ベース)
+    const minStayDist = {
+      n1: subsetRows.filter((r) => r.minNights <= 1).length,
+      n2: subsetRows.filter((r) => r.minNights === 2).length,
+      n3plus: subsetRows.filter((r) => r.minNights >= 3).length,
+    };
+
+    // 週末プレミアム (曜日タイプフィルタとは独立に、期間内の平日 vs 休前日で比較)
+    const weekdayPrices: number[] = [];
+    const preholidayPrices: number[] = [];
+    for (const m of ds.metrics) {
+      if (!ids.has(m.propertyId)) continue;
+      if (!(m.priceJpy > 0 && m.priceJpy <= MAX_SANE_NIGHTLY)) continue;
+      if (matchesDayType(m.targetDate, "weekday")) weekdayPrices.push(m.priceJpy);
+      else if (matchesDayType(m.targetDate, "preholiday")) preholidayPrices.push(m.priceJpy);
+    }
+    const weekdayAdr = Math.round(avg(weekdayPrices));
+    const preholidayAdr = Math.round(avg(preholidayPrices));
+    const weekendPremium =
+      weekdayPrices.length > 0 && preholidayPrices.length > 0 && weekdayAdr > 0
+        ? Math.round((preholidayAdr / weekdayAdr - 1) * 1000) / 10
+        : null;
+
+    return {
+      adr: Math.round(avg(adrs)),
+      occupancyRate: avg(occs),
+      revpar: Math.round(avg(adrs.map((a, i) => a * occs[i]))),
+      pacingOccupancy30: pacingOf(ds.pacingMetrics, pacing30End, ids),
+      pacingOccupancy60: pacingOf(ds.pacingMetrics, pacingEnd, ids),
+      pricePerGuest: Math.round(avg(ppgs)),
+      propertiesCount: subsetRows.length,
+      luminaAdr: luminaAdr !== null ? Math.round(luminaAdr) : null,
+      luminaOccupancy: luminaOcc,
+      top20Adr: Math.round(avg(top20.map((t) => t.adr))),
+      top20Revpar: Math.round(avg(top20.map((t) => t.adr * t.occ))),
+      top20Count,
+      alos: losVals.length > 0 ? Math.round(avg(losVals) * 10) / 10 : null,
+      minStay2PlusShare:
+        subsetRows.length > 0 ? (minStayDist.n2 + minStayDist.n3plus) / subsetRows.length : 0,
+      minStayDist,
+      weekendPremium,
+      weekdayAdr,
+      preholidayAdr,
+    };
   };
 
-  // ---- 週末プレミアム (曜日タイプフィルタとは独立に、期間内の平日 vs 休前日で比較) ----
-  const weekdayPrices: number[] = [];
-  const preholidayPrices: number[] = [];
-  for (const m of ds.metrics) {
-    if (!propIds.has(m.propertyId)) continue;
-    if (!(m.priceJpy > 0 && m.priceJpy <= MAX_SANE_NIGHTLY)) continue;
-    if (matchesDayType(m.targetDate, "weekday")) weekdayPrices.push(m.priceJpy);
-    else if (matchesDayType(m.targetDate, "preholiday")) preholidayPrices.push(m.priceJpy);
-  }
-  const weekdayAdr = Math.round(avg(weekdayPrices));
-  const preholidayAdr = Math.round(avg(preholidayPrices));
-  const weekendPremium =
-    weekdayPrices.length > 0 && preholidayPrices.length > 0 && weekdayAdr > 0
-      ? Math.round((preholidayAdr / weekdayAdr - 1) * 1000) / 10
-      : null;
-
-  const kpis: Kpis = {
-    adr: Math.round(avg(adrs)),
-    occupancyRate: avg(occs),
-    revpar: Math.round(avg(adrs.map((a, i) => a * occs[i]))),
-    pacingOccupancy30: pacingOf(ds.pacingMetrics, pacing30End),
-    pacingOccupancy60: pacingOf(ds.pacingMetrics, pacingEnd),
-    pricePerGuest: Math.round(avg(ppgs)),
-    propertiesCount: props.length,
-    luminaAdr: luminaAdr !== null ? Math.round(luminaAdr) : null,
-    luminaOccupancy: luminaOcc,
-    top20Adr: Math.round(avg(top20.map((t) => t.adr))),
-    top20Revpar: Math.round(avg(top20.map((t) => t.adr * t.occ))),
-    top20Count,
-    alos: losVals.length > 0 ? Math.round(avg(losVals) * 10) / 10 : null,
-    minStay2PlusShare:
-      rows.length > 0 ? (minStayDist.n2 + minStayDist.n3plus) / rows.length : 0,
-    minStayDist,
-    weekendPremium,
-    weekdayAdr,
-    preholidayAdr,
-  };
+  const kpis = kpisFor(rows);
+  // rows はADR降順ソート済みのため、先頭20%がハイエンド層
+  const kpisTop20 = kpisFor(
+    rows.slice(0, rows.length > 0 ? Math.max(1, Math.ceil(rows.length * 0.2)) : 0),
+  );
 
   // ---- 日別トレンド ----
   const byDate = new Map<string, { prices: number[]; booked: number; total: number }>();
@@ -370,6 +380,8 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
 
   return {
     kpis,
+    kpisTop20,
+    visibleKpiCards: ds.visibleKpiCards,
     scatter,
     trend,
     capacityBars,

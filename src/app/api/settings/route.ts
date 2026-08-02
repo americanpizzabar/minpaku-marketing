@@ -7,6 +7,7 @@ import {
   COST_PER_SEARCH_CALL,
   ALL_AREAS,
 } from "@/lib/airroi";
+import { KPI_CARD_DEFS } from "@/lib/kpi-cards";
 import { ensureSchema, getDb } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
@@ -133,6 +134,11 @@ export async function POST(request: NextRequest) {
         : undefined,
     luminaLat: floatField(body.luminaLat, 20, 46),
     luminaLng: floatField(body.luminaLng, 122, 154),
+    kpiCards: Array.isArray(body.kpiCards)
+      ? (body.kpiCards as unknown[])
+          .map(String)
+          .filter((id) => KPI_CARD_DEFS.some((d) => d.id === id))
+      : undefined,
   });
 
   const config = await getSyncConfig(db);

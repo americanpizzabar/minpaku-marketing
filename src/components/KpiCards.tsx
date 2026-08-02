@@ -86,7 +86,19 @@ interface CardDef {
   accent?: "up" | "down" | null;
 }
 
-export default function KpiCards({ kpis }: { kpis: Kpis }) {
+export default function KpiCards({
+  kpis: kpisAll,
+  kpisTop20,
+  visibleCards = [],
+}: {
+  kpis: Kpis;
+  kpisTop20: Kpis;
+  visibleCards?: string[];
+}) {
+  // 全物件 / ADR上位20% (ハイエンド層) の集計セグメント切替
+  const [segment, setSegment] = useState<"all" | "top20">("all");
+  const kpis = segment === "top20" ? kpisTop20 : kpisAll;
+
   const luminaDiff =
     kpis.luminaAdr !== null && kpis.adr > 0
       ? ((kpis.luminaAdr - kpis.adr) / kpis.adr) * 100
@@ -214,10 +226,39 @@ export default function KpiCards({ kpis }: { kpis: Kpis }) {
   };
 
   const byId = new Map(cards.map((c) => [c.id, c]));
-  const ordered = order.map((id) => byId.get(id)).filter((c): c is CardDef => Boolean(c));
+  const ordered = order
+    .map((id) => byId.get(id))
+    .filter((c): c is CardDef => Boolean(c))
+    // 設定画面で選択されたカードのみ表示 (未設定 = 全て表示)
+    .filter((c) => visibleCards.length === 0 || visibleCards.includes(c.id));
 
   return (
     <div>
+      <div className="mb-2 flex items-center gap-1">
+        {(
+          [
+            ["all", `全物件 (${kpisAll.propertiesCount})`],
+            ["top20", `上位20%のみ (${kpisTop20.propertiesCount})`],
+          ] as const
+        ).map(([value, label]) => (
+          <button
+            key={value}
+            onClick={() => setSegment(value)}
+            className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+              segment === value
+                ? "bg-indigo-600 text-white"
+                : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+        {segment === "top20" && (
+          <span className="text-[11px] text-slate-400">
+            ADR上位20%のハイエンド層だけで全指標を再計算しています
+          </span>
+        )}
+      </div>
       <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
         <SortableContext items={order} strategy={rectSortingStrategy}>
           <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">

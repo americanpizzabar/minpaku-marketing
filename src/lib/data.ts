@@ -23,6 +23,7 @@ export interface Dataset {
   lumina: LuminaMetric[]; // 指定期間内のみ
   pacingMetrics: DailyMetric[]; // 今後60日 (Pacing KPI用、フィルタ済み物件のみで別途絞り込み)
   luminaProfile: LuminaProfile;
+  visibleKpiCards: string[]; // 設定画面で選択された表示カードID (空 = 全て)
   dataSource: "turso" | "demo";
   lastSyncedAt: string | null;
 }
@@ -81,6 +82,7 @@ export async function loadDataset(
       lat: null,
       lng: null,
     },
+    visibleKpiCards: [],
     dataSource: "demo",
     lastSyncedAt: null,
   };
@@ -126,7 +128,7 @@ async function loadFromTurso(
       "SELECT created_at FROM sync_logs WHERE status = 'SUCCESS' ORDER BY created_at DESC LIMIT 1",
     ),
     db.execute(
-      "SELECT key, value FROM sync_state WHERE key LIKE 'config:lumina%' OR key = 'lumina_source'",
+      "SELECT key, value FROM sync_state WHERE key LIKE 'config:lumina%' OR key = 'lumina_source' OR key = 'config:kpi_cards'",
     ),
   ]);
 
@@ -197,6 +199,7 @@ async function loadFromTurso(
       lat: cfgNum("config:lumina_lat"),
       lng: cfgNum("config:lumina_lng"),
     },
+    visibleKpiCards: (luminaCfg.get("config:kpi_cards") ?? "").split(",").filter(Boolean),
     dataSource: "turso",
     lastSyncedAt: syncRes.rows[0] ? String(syncRes.rows[0].created_at) : null,
   };

@@ -34,7 +34,11 @@ export default async function DashboardPage({
           )}
         </div>
 
-        <KpiCards kpis={data.kpis} />
+        <KpiCards
+          kpis={data.kpis}
+          kpisTop20={data.kpisTop20}
+          visibleCards={data.visibleKpiCards}
+        />
 
         <DashboardTabs
           scatter={data.scatter}

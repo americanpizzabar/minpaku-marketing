@@ -47,6 +47,7 @@ export interface SyncConfig {
   luminaOccupancy: number | null; // 自物件の稼働率 (%表記, API未収録時に使用, null=未設定)
   luminaLat: number | null; // 自物件の緯度 (地図マーカー位置, null=未設定)
   luminaLng: number | null; // 自物件の経度
+  kpiCards: string[]; // マーケット概況の表示カードID (空 = 全て表示)
 }
 
 /** Webアプリの設定画面で保存された値 (sync_state) を環境変数既定値とマージして返す */
@@ -82,6 +83,7 @@ export async function getSyncConfig(db: Client): Promise<SyncConfig> {
       const n = Number(map.get("config:lumina_lng"));
       return Number.isFinite(n) && n !== 0 ? n : null;
     })(),
+    kpiCards: (map.get("config:kpi_cards") ?? "").split(",").filter(Boolean),
   };
 }
 
@@ -108,6 +110,8 @@ export async function saveSyncConfig(db: Client, config: Partial<SyncConfig>): P
     entries.push(["config:lumina_lat", config.luminaLat === null ? "" : String(config.luminaLat)]);
   if (config.luminaLng !== undefined)
     entries.push(["config:lumina_lng", config.luminaLng === null ? "" : String(config.luminaLng)]);
+  if (config.kpiCards !== undefined)
+    entries.push(["config:kpi_cards", config.kpiCards.join(",")]);
   for (const [key, value] of entries) {
     await db.execute({
       sql: `INSERT INTO sync_state (key, value) VALUES (?, ?)

@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { KPI_CARD_DEFS } from "@/lib/kpi-cards";
 
 interface SettingsState {
   autoSync: boolean;
@@ -15,6 +16,7 @@ interface SettingsState {
   luminaOccupancy: number | ""; // "" = 未設定
   luminaLat: string; // 文字列で保持 ("" = 未設定)
   luminaLng: string;
+  kpiCards: string[]; // 表示するKPIカードID (空 = 全て表示)
 }
 
 function toFormState(config: Record<string, unknown>): SettingsState {
@@ -33,6 +35,7 @@ function toFormState(config: Record<string, unknown>): SettingsState {
         : Number(config.luminaOccupancy),
     luminaLat: config.luminaLat == null ? "" : String(config.luminaLat),
     luminaLng: config.luminaLng == null ? "" : String(config.luminaLng),
+    kpiCards: Array.isArray(config.kpiCards) ? (config.kpiCards as string[]) : [],
   };
 }
 
@@ -293,6 +296,35 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                       placeholder="例: 65 (空欄=未設定)"
                     />
                   </div>
+                </div>
+              </div>
+
+              <div className="rounded-lg bg-slate-50 p-2.5">
+                <p className="mb-2 text-[11px] font-semibold text-slate-500">
+                  マーケット概況の表示カード (未選択 = 全て表示)
+                </p>
+                <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
+                  {KPI_CARD_DEFS.map((def) => (
+                    <label
+                      key={def.id}
+                      className="flex items-center gap-2 text-xs text-slate-700"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={form.kpiCards.includes(def.id)}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            kpiCards: e.target.checked
+                              ? [...form.kpiCards, def.id]
+                              : form.kpiCards.filter((id) => id !== def.id),
+                          })
+                        }
+                        className="h-4 w-4 shrink-0 accent-indigo-600"
+                      />
+                      {def.label}
+                    </label>
+                  ))}
                 </div>
               </div>
 

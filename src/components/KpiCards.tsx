@@ -3,7 +3,8 @@
 import { useEffect, useState } from "react";
 import {
   DndContext,
-  PointerSensor,
+  MouseSensor,
+  TouchSensor,
   closestCenter,
   useSensor,
   useSensors,
@@ -65,7 +66,9 @@ function SortableCard({ id, children }: { id: string; children: React.ReactNode 
         transform: CSS.Transform.toString(transform),
         transition,
         touchAction: "manipulation",
+        WebkitTouchCallout: "none",
       }}
+      onContextMenu={(e) => e.preventDefault()}
       {...attributes}
       {...listeners}
       className={`select-none ${isDragging ? "z-10 opacity-90 shadow-xl ring-2 ring-indigo-400" : ""}`}
@@ -184,9 +187,12 @@ export default function KpiCards({ kpis }: { kpis: Kpis }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 長押し (400ms) でドラッグ開始。それ未満の操作はスクロール等に譲る
+  // 長押し (400ms) でドラッグ開始。それ未満の操作はスクロール等に譲る。
+  // PointerSensorはモバイルでドラッグ中にブラウザのスクロールが介入して
+  // pointercancelで解除されるため、touchmoveを抑止できるTouchSensorを使う。
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { delay: 400, tolerance: 8 } }),
+    useSensor(MouseSensor, { activationConstraint: { delay: 400, tolerance: 8 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 400, tolerance: 8 } }),
   );
 
   const handleDragEnd = (event: DragEndEvent) => {

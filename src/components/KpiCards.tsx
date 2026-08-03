@@ -62,19 +62,21 @@ interface CardDef {
 function Card({ def }: { def: CardDef }) {
   const style = SEGMENT_STYLE[def.segment];
   return (
-    <div className={`h-full rounded-xl border p-4 shadow-sm ${style.card}`}>
-      <p className="flex items-start gap-1.5 pr-5 text-xs font-semibold text-slate-500">
+    <div className={`h-full rounded-lg border p-2.5 shadow-sm ${style.card}`}>
+      <p className="flex flex-wrap items-start gap-1 pr-4 text-[10px] leading-tight font-semibold text-slate-500">
         <span
-          className={`shrink-0 rounded-full px-1.5 py-px text-[10px] font-semibold ${style.badge}`}
+          className={`shrink-0 rounded-full px-1.5 py-px text-[9px] font-semibold ${style.badge}`}
         >
           {style.badgeLabel}
         </span>
         {def.label}
       </p>
-      <p className="mt-1 text-2xl font-bold tracking-tight text-slate-900">{def.value}</p>
+      <p className="mt-0.5 text-lg font-bold tracking-tight text-slate-900 md:text-xl">
+        {def.value}
+      </p>
       {def.sub && (
         <p
-          className={`mt-1 text-xs ${
+          className={`mt-0.5 text-[10px] leading-tight ${
             def.accent === "up"
               ? "text-emerald-600"
               : def.accent === "down"
@@ -110,7 +112,7 @@ function SortableCard({ id, children }: { id: string; children: React.ReactNode 
         style={{ touchAction: "none", WebkitTouchCallout: "none" }}
         onContextMenu={(e) => e.preventDefault()}
         aria-label="ドラッグして並び替え"
-        className="absolute top-1.5 right-1.5 cursor-grab rounded px-1.5 py-0.5 text-sm leading-none text-slate-300 hover:bg-slate-100 hover:text-slate-500 active:cursor-grabbing"
+        className="absolute top-1 right-1 cursor-grab rounded px-1 py-0.5 text-xs leading-none text-slate-300 hover:bg-slate-100 hover:text-slate-500 active:cursor-grabbing"
       >
         ⠿
       </button>
@@ -151,22 +153,31 @@ function buildSegmentCards(kpis: Kpis, segment: KpiSegmentId): CardDef[] {
       value: formatJpy(kpis.pricePerGuest),
       sub: "1泊料金 ÷ 収容定員",
     },
-    lumina: {
-      label: "Lumina Fuji 差異",
-      value: luminaDiff !== null ? `${luminaDiff >= 0 ? "+" : ""}${luminaDiff.toFixed(1)}%` : "—",
-      sub:
-        kpis.luminaAdr !== null
-          ? `自社ADR ${formatJpy(kpis.luminaAdr)} との比較`
-          : "自社データ未登録",
-      accent: luminaDiff !== null ? (luminaDiff >= 0 ? "up" : "down") : null,
-    },
+    lumina: isOwn
+      ? {
+          label: "Lumina Fuji 差異",
+          value: "—",
+          sub: "自物件のため対象外",
+        }
+      : {
+          label: "Lumina Fuji 差異",
+          value:
+            luminaDiff !== null ? `${luminaDiff >= 0 ? "+" : ""}${luminaDiff.toFixed(1)}%` : "—",
+          sub:
+            kpis.luminaAdr !== null
+              ? `自社ADR ${formatJpy(kpis.luminaAdr)} との比較`
+              : "自社データ未登録",
+          accent: luminaDiff !== null ? (luminaDiff >= 0 ? "up" : "down") : null,
+        },
     alos: {
       label: "平均滞在日数 (ALOS)",
       value: kpis.alos !== null ? `${kpis.alos}泊` : "—",
       sub:
         kpis.alos !== null
           ? "過去12ヶ月実績 (AirROI集計)"
-          : "設定の「物件情報を今すぐ更新」後に表示",
+          : isOwn
+            ? "AirROI収録後に表示"
+            : "設定の「物件情報を今すぐ更新」後に表示",
     },
     weekend: {
       label: "週末プレミアム",
@@ -177,11 +188,17 @@ function buildSegmentCards(kpis: Kpis, segment: KpiSegmentId): CardDef[] {
       sub: `平日 ${formatJpy(kpis.weekdayAdr)} → 休前日 ${formatJpy(kpis.preholidayAdr)}`,
       accent: kpis.weekendPremium !== null && kpis.weekendPremium > 0 ? "up" : null,
     },
-    minstay: {
-      label: "最低2泊以上の物件",
-      value: formatPercent(kpis.minStay2PlusShare),
-      sub: `1泊OK ${pct(dist.n1)}% / 2泊 ${pct(dist.n2)}% / 3泊+ ${pct(dist.n3plus)}%`,
-    },
+    minstay: isOwn
+      ? {
+          label: "最低2泊以上の物件",
+          value: "—",
+          sub: "AirROI収録後に表示",
+        }
+      : {
+          label: "最低2泊以上の物件",
+          value: formatPercent(kpis.minStay2PlusShare),
+          sub: `1泊OK ${pct(dist.n1)}% / 2泊 ${pct(dist.n2)}% / 3泊+ ${pct(dist.n3plus)}%`,
+        },
   };
 
   const seg = KPI_SEGMENTS.find((s) => s.id === segment)!;
@@ -264,7 +281,7 @@ export default function KpiCards({
     <div>
       <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
         <SortableContext items={ordered.map((c) => c.id)} strategy={rectSortingStrategy}>
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
+          <div className="grid grid-cols-3 gap-2 xl:grid-cols-6">
             {ordered.map((c) => (
               <SortableCard key={c.id} id={c.id}>
                 <Card def={c} />

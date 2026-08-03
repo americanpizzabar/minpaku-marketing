@@ -34,7 +34,8 @@ export const KPI_SEGMENTS: {
   {
     id: "own",
     label: "Lumina Fuji",
-    metricIds: ["adr", "occupancy", "revpar", "pacing", "ppg", "weekend"],
+    // 行揃えのため全指標を持つ (差異/ALOS/最低泊数は自物件ではプレースホルダ表示)
+    metricIds: ["adr", "occupancy", "revpar", "pacing", "ppg", "lumina", "alos", "weekend", "minstay"],
   },
 ];
 
@@ -49,13 +50,9 @@ export const KPI_CARD_DEFS: { id: string; label: string; segment: KpiSegmentId }
   );
 
 /**
- * 既定の並び順: 指標ごとに「全物件 → 上位20%」のペアで並べ (2列表示で左右に揃う)、
- * 最後に Lumina Fuji 単体のカード群を置く。
+ * 既定の並び順: 指標ごとに「全物件 → 上位20% → Lumina」の3枚組で並べる
+ * (3列表示で各行が同一指標のセグメント比較になる)。
  */
-export const DEFAULT_KPI_ORDER: string[] = [
-  ...KPI_SEGMENTS.find((s) => s.id === "all")!.metricIds.flatMap((mid) => [
-    `all:${mid}`,
-    `top:${mid}`,
-  ]),
-  ...KPI_SEGMENTS.find((s) => s.id === "own")!.metricIds.map((mid) => `own:${mid}`),
-];
+export const DEFAULT_KPI_ORDER: string[] = KPI_SEGMENTS.find(
+  (s) => s.id === "all",
+)!.metricIds.flatMap((mid) => [`all:${mid}`, `top:${mid}`, `own:${mid}`]);

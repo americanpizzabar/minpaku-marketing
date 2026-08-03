@@ -26,7 +26,8 @@ import {
 } from "@/lib/kpi-cards";
 import type { Kpis } from "@/lib/types";
 
-const ORDER_KEY = "kpi-card-order-v3";
+// v4: 3列構成への変更に伴い既定順をリセット (旧配置の保存は引き継がない)
+const ORDER_KEY = "kpi-card-order-v4";
 
 // セグメントごとの配色とバッジ
 const SEGMENT_STYLE: Record<

@@ -7,7 +7,6 @@ export const KPI_METRICS = [
   { id: "pacing", label: "Pacing 稼働率" },
   { id: "ppg", label: "1人当たり平均単価" },
   { id: "lumina", label: "Lumina Fuji 差異" },
-  { id: "top20", label: "上位20% ADR (ハイエンド層)" },
   { id: "alos", label: "平均滞在日数 (ALOS)" },
   { id: "weekend", label: "週末プレミアム" },
   { id: "minstay", label: "最低2泊以上の物件" },
@@ -16,7 +15,7 @@ export const KPI_METRICS = [
 export type KpiMetricId = (typeof KPI_METRICS)[number]["id"];
 export type KpiSegmentId = "all" | "top" | "own";
 
-/** セグメントごとに表示する指標 (top: 上位20%ADRは重複のため除外 / own: 自物件で意味のある指標のみ) */
+/** セグメントごとに表示する指標 (own: 自物件で意味のある指標のみ) */
 export const KPI_SEGMENTS: {
   id: KpiSegmentId;
   label: string;
@@ -25,7 +24,7 @@ export const KPI_SEGMENTS: {
   {
     id: "all",
     label: "全物件",
-    metricIds: ["adr", "occupancy", "revpar", "pacing", "ppg", "lumina", "top20", "alos", "weekend", "minstay"],
+    metricIds: ["adr", "occupancy", "revpar", "pacing", "ppg", "lumina", "alos", "weekend", "minstay"],
   },
   {
     id: "top",
@@ -48,3 +47,15 @@ export const KPI_CARD_DEFS: { id: string; label: string; segment: KpiSegmentId }
       segment: seg.id,
     })),
   );
+
+/**
+ * 既定の並び順: 指標ごとに「全物件 → 上位20%」のペアで並べ (2列表示で左右に揃う)、
+ * 最後に Lumina Fuji 単体のカード群を置く。
+ */
+export const DEFAULT_KPI_ORDER: string[] = [
+  ...KPI_SEGMENTS.find((s) => s.id === "all")!.metricIds.flatMap((mid) => [
+    `all:${mid}`,
+    `top:${mid}`,
+  ]),
+  ...KPI_SEGMENTS.find((s) => s.id === "own")!.metricIds.map((mid) => `own:${mid}`),
+];

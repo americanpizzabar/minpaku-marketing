@@ -18,7 +18,12 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { formatJpy, formatPercent } from "@/lib/format";
-import { KPI_SEGMENTS, type KpiMetricId, type KpiSegmentId } from "@/lib/kpi-cards";
+import {
+  DEFAULT_KPI_ORDER,
+  KPI_SEGMENTS,
+  type KpiMetricId,
+  type KpiSegmentId,
+} from "@/lib/kpi-cards";
 import type { Kpis } from "@/lib/types";
 
 const ORDER_KEY = "kpi-card-order-v3";
@@ -155,11 +160,6 @@ function buildSegmentCards(kpis: Kpis, segment: KpiSegmentId): CardDef[] {
           : "自社データ未登録",
       accent: luminaDiff !== null ? (luminaDiff >= 0 ? "up" : "down") : null,
     },
-    top20: {
-      label: "上位20% ADR (ハイエンド層)",
-      value: formatJpy(kpis.top20Adr),
-      sub: `RevPAR ${formatJpy(kpis.top20Revpar)} / 上位${kpis.top20Count}物件`,
-    },
     alos: {
       label: "平均滞在日数 (ALOS)",
       value: kpis.alos !== null ? `${kpis.alos}泊` : "—",
@@ -208,7 +208,8 @@ export default function KpiCards({
     ...buildSegmentCards(kpisTop20, "top"),
     ...buildSegmentCards(kpisLumina, "own"),
   ];
-  const defaultOrder = allCards.map((c) => c.id);
+  // 既定順: 指標ごとに全物件→上位20%のペア、最後にLumina群 (2列表示で左右に揃う)
+  const defaultOrder = DEFAULT_KPI_ORDER;
   const [order, setOrder] = useState<string[]>(defaultOrder);
 
   // 端末に保存された並び順を復元 (新しいカードは末尾に追加)

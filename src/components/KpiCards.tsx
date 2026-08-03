@@ -18,36 +18,66 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { formatJpy, formatPercent } from "@/lib/format";
+import { KPI_SEGMENTS, type KpiMetricId, type KpiSegmentId } from "@/lib/kpi-cards";
 import type { Kpis } from "@/lib/types";
 
-const ORDER_KEY = "kpi-card-order-v1";
+const ORDER_KEY = "kpi-card-order-v3";
 
-function Card({
-  label,
-  value,
-  sub,
-  accent,
-}: {
+// セグメントごとの配色とバッジ
+const SEGMENT_STYLE: Record<
+  KpiSegmentId,
+  { card: string; badge: string; badgeLabel: string }
+> = {
+  all: {
+    card: "border-slate-200 bg-white",
+    badge: "bg-slate-600 text-white",
+    badgeLabel: "全物件",
+  },
+  top: {
+    card: "border-amber-200 bg-amber-50",
+    badge: "bg-amber-500 text-white",
+    badgeLabel: "上位20%",
+  },
+  own: {
+    card: "border-rose-200 bg-rose-50",
+    badge: "bg-rose-500 text-white",
+    badgeLabel: "Lumina",
+  },
+};
+
+interface CardDef {
+  id: string;
+  segment: KpiSegmentId;
   label: string;
   value: string;
   sub?: string;
   accent?: "up" | "down" | null;
-}) {
+}
+
+function Card({ def }: { def: CardDef }) {
+  const style = SEGMENT_STYLE[def.segment];
   return (
-    <div className="h-full rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-      <p className="text-xs font-semibold text-slate-500">{label}</p>
-      <p className="mt-1 text-2xl font-bold tracking-tight text-slate-900">{value}</p>
-      {sub && (
+    <div className={`h-full rounded-xl border p-4 shadow-sm ${style.card}`}>
+      <p className="flex items-start gap-1.5 pr-5 text-xs font-semibold text-slate-500">
+        <span
+          className={`shrink-0 rounded-full px-1.5 py-px text-[10px] font-semibold ${style.badge}`}
+        >
+          {style.badgeLabel}
+        </span>
+        {def.label}
+      </p>
+      <p className="mt-1 text-2xl font-bold tracking-tight text-slate-900">{def.value}</p>
+      {def.sub && (
         <p
           className={`mt-1 text-xs ${
-            accent === "up"
+            def.accent === "up"
               ? "text-emerald-600"
-              : accent === "down"
+              : def.accent === "down"
                 ? "text-rose-600"
                 : "text-slate-500"
           }`}
         >
-          {sub}
+          {def.sub}
         </p>
       )}
     </div>
@@ -56,9 +86,7 @@ function Card({
 
 /**
  * ドラッグハンドル (⠿) 方式の並び替えラッパー。
- * カード全体を掴む方式はモバイルブラウザのスクロール介入でドラッグが
- * 中断されるため、touch-action: none を適用した小さなハンドルに限定する
- * (ハンドル以外はどこを触っても通常どおりスクロールできる)。
+ * touch-action: none はハンドルのみに適用し、カード本体はスクロール可能に保つ。
  */
 function SortableCard({ id, children }: { id: string; children: React.ReactNode }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
@@ -85,16 +113,8 @@ function SortableCard({ id, children }: { id: string; children: React.ReactNode 
   );
 }
 
-interface CardDef {
-  id: string;
-  label: string;
-  value: string;
-  sub?: string;
-  accent?: "up" | "down" | null;
-}
-
-/** KPIセットからカード定義を組み立てる (全物件/上位20%の両セクションで共用) */
-function buildCards(kpis: Kpis): CardDef[] {
+/** 指定セグメントのKPIセットからカード定義を組み立てる */
+function buildSegmentCards(kpis: Kpis, segment: KpiSegmentId): CardDef[] {
   const luminaDiff =
     kpis.luminaAdr !== null && kpis.adr > 0
       ? ((kpis.luminaAdr - kpis.adr) / kpis.adr) * 100
@@ -102,53 +122,45 @@ function buildCards(kpis: Kpis): CardDef[] {
   const dist = kpis.minStayDist;
   const distTotal = dist.n1 + dist.n2 + dist.n3plus;
   const pct = (n: number) => (distTotal > 0 ? Math.round((n / distTotal) * 100) : 0);
+  const isOwn = segment === "own";
 
-  return [
-    {
-      id: "adr",
+  const byMetric: Record<KpiMetricId, Omit<CardDef, "id" | "segment">> = {
+    adr: {
       label: "平均客室単価 (ADR)",
       value: formatJpy(kpis.adr),
-      sub: `${kpis.propertiesCount}物件の平均`,
+      sub: isOwn ? "自物件の平均価格" : `${kpis.propertiesCount}物件の平均`,
     },
-    {
-      id: "occupancy",
+    occupancy: {
       label: "平均稼働率",
       value: formatPercent(kpis.occupancyRate),
-      sub: "指定期間の予約埋まり率",
+      sub: isOwn ? "自物件 (実績または設定値)" : "指定期間の予約埋まり率",
     },
-    { id: "revpar", label: "RevPAR", value: formatJpy(kpis.revpar), sub: "ADR × 稼働率" },
-    {
-      id: "pacing",
+    revpar: { label: "RevPAR", value: formatJpy(kpis.revpar), sub: "ADR × 稼働率" },
+    pacing: {
       label: "Pacing 稼働率",
       value: formatPercent(kpis.pacingOccupancy30),
       sub: `今後30日 / 60日: ${formatPercent(kpis.pacingOccupancy60)}`,
     },
-    {
-      id: "ppg",
+    ppg: {
       label: "1人当たり平均単価",
       value: formatJpy(kpis.pricePerGuest),
       sub: "1泊料金 ÷ 収容定員",
     },
-    {
-      id: "lumina",
+    lumina: {
       label: "Lumina Fuji 差異",
       value: luminaDiff !== null ? `${luminaDiff >= 0 ? "+" : ""}${luminaDiff.toFixed(1)}%` : "—",
       sub:
         kpis.luminaAdr !== null
-          ? `自社ADR ${formatJpy(kpis.luminaAdr)} / 稼働 ${
-              kpis.luminaOccupancy !== null ? formatPercent(kpis.luminaOccupancy) : "—"
-            }`
+          ? `自社ADR ${formatJpy(kpis.luminaAdr)} との比較`
           : "自社データ未登録",
       accent: luminaDiff !== null ? (luminaDiff >= 0 ? "up" : "down") : null,
     },
-    {
-      id: "top20",
+    top20: {
       label: "上位20% ADR (ハイエンド層)",
       value: formatJpy(kpis.top20Adr),
       sub: `RevPAR ${formatJpy(kpis.top20Revpar)} / 上位${kpis.top20Count}物件`,
     },
-    {
-      id: "alos",
+    alos: {
       label: "平均滞在日数 (ALOS)",
       value: kpis.alos !== null ? `${kpis.alos}泊` : "—",
       sub:
@@ -156,8 +168,7 @@ function buildCards(kpis: Kpis): CardDef[] {
           ? "過去12ヶ月実績 (AirROI集計)"
           : "設定の「物件情報を今すぐ更新」後に表示",
     },
-    {
-      id: "weekend",
+    weekend: {
       label: "週末プレミアム",
       value:
         kpis.weekendPremium !== null
@@ -166,66 +177,38 @@ function buildCards(kpis: Kpis): CardDef[] {
       sub: `平日 ${formatJpy(kpis.weekdayAdr)} → 休前日 ${formatJpy(kpis.preholidayAdr)}`,
       accent: kpis.weekendPremium !== null && kpis.weekendPremium > 0 ? "up" : null,
     },
-    {
-      id: "minstay",
+    minstay: {
       label: "最低2泊以上の物件",
       value: formatPercent(kpis.minStay2PlusShare),
       sub: `1泊OK ${pct(dist.n1)}% / 2泊 ${pct(dist.n2)}% / 3泊+ ${pct(dist.n3plus)}%`,
     },
-  ];
-}
-
-/** 1セグメント分のカードグリッド (長押し並び替え対応) */
-function CardGrid({
-  cards,
-  order,
-  onReorder,
-}: {
-  cards: CardDef[];
-  order: string[];
-  onReorder: (activeId: string, overId: string) => void;
-}) {
-  // ハンドル方式のため長押し不要。誤操作防止に短い遅延のみ設定
-  const sensors = useSensors(
-    useSensor(MouseSensor, { activationConstraint: { distance: 4 } }),
-    useSensor(TouchSensor, { activationConstraint: { delay: 120, tolerance: 8 } }),
-  );
-
-  const byId = new Map(cards.map((c) => [c.id, c]));
-  const ordered = order.map((id) => byId.get(id)).filter((c): c is CardDef => Boolean(c));
-  const items = ordered.map((c) => c.id);
-
-  const handleDragEnd = (event: DragEndEvent) => {
-    const { active, over } = event;
-    if (!over || active.id === over.id) return;
-    onReorder(String(active.id), String(over.id));
   };
 
-  return (
-    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-      <SortableContext items={items} strategy={rectSortingStrategy}>
-        <div className="grid grid-cols-2 gap-3 2xl:grid-cols-3">
-          {ordered.map((c) => (
-            <SortableCard key={c.id} id={c.id}>
-              <Card label={c.label} value={c.value} sub={c.sub} accent={c.accent} />
-            </SortableCard>
-          ))}
-        </div>
-      </SortableContext>
-    </DndContext>
-  );
+  const seg = KPI_SEGMENTS.find((s) => s.id === segment)!;
+  return seg.metricIds.map((mid) => ({
+    id: `${segment}:${mid}`,
+    segment,
+    ...byMetric[mid],
+  }));
 }
 
 export default function KpiCards({
   kpis,
   kpisTop20,
+  kpisLumina,
   visibleCards = [],
 }: {
   kpis: Kpis;
   kpisTop20: Kpis;
+  kpisLumina: Kpis;
   visibleCards?: string[];
 }) {
-  const defaultOrder = buildCards(kpis).map((c) => c.id);
+  const allCards: CardDef[] = [
+    ...buildSegmentCards(kpis, "all"),
+    ...buildSegmentCards(kpisTop20, "top"),
+    ...buildSegmentCards(kpisLumina, "own"),
+  ];
+  const defaultOrder = allCards.map((c) => c.id);
   const [order, setOrder] = useState<string[]>(defaultOrder);
 
   // 端末に保存された並び順を復元 (新しいカードは末尾に追加)
@@ -245,9 +228,21 @@ export default function KpiCards({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleReorder = (activeId: string, overId: string) => {
+  // ハンドル方式のため長押し不要。誤操作防止に短い遅延のみ設定
+  const sensors = useSensors(
+    useSensor(MouseSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 120, tolerance: 8 } }),
+  );
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
     setOrder((current) => {
-      const next = arrayMove(current, current.indexOf(activeId), current.indexOf(overId));
+      const next = arrayMove(
+        current,
+        current.indexOf(String(active.id)),
+        current.indexOf(String(over.id)),
+      );
       try {
         localStorage.setItem(ORDER_KEY, JSON.stringify(next));
       } catch {
@@ -257,39 +252,28 @@ export default function KpiCards({
     });
   };
 
-  const isVisible = (id: string) => visibleCards.length === 0 || visibleCards.includes(id);
-  const allCards = buildCards(kpis).filter((c) => isVisible(c.id));
-  // 上位20%セクションでは「上位20% ADR」カードは重複 (=そのセクションのADR) のため除外
-  const topCards = buildCards(kpisTop20).filter((c) => c.id !== "top20" && isVisible(c.id));
+  const byId = new Map(allCards.map((c) => [c.id, c]));
+  const ordered = order
+    .map((id) => byId.get(id))
+    .filter((c): c is CardDef => Boolean(c))
+    // 設定画面で選択されたカードのみ表示 (未設定 = 全て表示)
+    .filter((c) => visibleCards.length === 0 || visibleCards.includes(c.id));
 
   return (
-    <div className="flex flex-col gap-2">
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <section className="rounded-2xl border border-slate-200 bg-slate-100/70 p-3">
-          <h3 className="mb-2 flex flex-wrap items-center gap-2 text-sm font-bold text-slate-800">
-            <span className="rounded-full bg-slate-600 px-2.5 py-0.5 text-[11px] font-semibold text-white">
-              全物件
-            </span>
-            <span className="font-normal text-slate-500">{kpis.propertiesCount}物件の集計</span>
-          </h3>
-          <CardGrid cards={allCards} order={order} onReorder={handleReorder} />
-        </section>
-
-        <section className="rounded-2xl border border-amber-200 bg-amber-50/70 p-3">
-          <h3 className="mb-2 flex flex-wrap items-center gap-2 text-sm font-bold text-slate-800">
-            <span className="rounded-full bg-amber-500 px-2.5 py-0.5 text-[11px] font-semibold text-white">
-              上位20%のみ
-            </span>
-            <span className="font-normal text-slate-500">
-              ハイエンド層 — ADR上位{kpisTop20.propertiesCount}物件で再計算
-            </span>
-          </h3>
-          <CardGrid cards={topCards} order={order} onReorder={handleReorder} />
-        </section>
-      </div>
-
-      <p className="text-right text-[11px] text-slate-400">
-        カード右上の ⠿ をドラッグすると並び替えできます (左右両方に反映・この端末に保存)
+    <div>
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+        <SortableContext items={ordered.map((c) => c.id)} strategy={rectSortingStrategy}>
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
+            {ordered.map((c) => (
+              <SortableCard key={c.id} id={c.id}>
+                <Card def={c} />
+              </SortableCard>
+            ))}
+          </div>
+        </SortableContext>
+      </DndContext>
+      <p className="mt-1.5 text-right text-[11px] text-slate-400">
+        カード右上の ⠿ をドラッグで自由に並び替え (この端末に保存) / 表示するカードは「⚙ 設定」で選択
       </p>
     </div>
   );

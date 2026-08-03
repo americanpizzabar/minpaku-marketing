@@ -218,6 +218,7 @@ export interface MapPoint {
 export interface DashboardData {
   kpis: Kpis;
   kpisTop20: Kpis; // ADR上位20% (ハイエンド層) のみで再計算した同指標
+  kpisLumina: Kpis; // Lumina Fuji 単体の同指標
   visibleKpiCards: string[]; // 設定画面で選択された表示カードID (空 = 全て表示)
   scatter: ScatterPoint[];
   trend: TrendPoint[];

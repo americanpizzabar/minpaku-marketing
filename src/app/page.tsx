@@ -37,6 +37,7 @@ export default async function DashboardPage({
         <KpiCards
           kpis={data.kpis}
           kpisTop20={data.kpisTop20}
+          kpisLumina={data.kpisLumina}
           visibleCards={data.visibleKpiCards}
         />
 

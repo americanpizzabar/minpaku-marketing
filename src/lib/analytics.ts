@@ -309,6 +309,56 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
     rows.slice(0, rows.length > 0 ? Math.max(1, Math.ceil(rows.length * 0.2)) : 0),
   );
 
+  // ---- Lumina Fuji 単体のKPI (lumina_fuji_metrics + 設定値から算出) ----
+  const kpisLumina: Kpis = (() => {
+    const adr = luminaAdr ?? 0;
+    const occ = luminaOcc ?? 0;
+    // 自物件の週末プレミアム (期間内の設定価格ベース)
+    const wk: number[] = [];
+    const ph: number[] = [];
+    for (const m of ds.lumina) {
+      if (m.configuredPrice <= 0) continue;
+      if (matchesDayType(m.targetDate, "weekday")) wk.push(m.configuredPrice);
+      else if (matchesDayType(m.targetDate, "preholiday")) ph.push(m.configuredPrice);
+    }
+    const wkAdr = Math.round(avg(wk));
+    const phAdr = Math.round(avg(ph));
+    const premium =
+      wk.length > 0 && ph.length > 0 && wkAdr > 0
+        ? Math.round((phAdr / wkAdr - 1) * 1000) / 10
+        : null;
+    // Pacing: API実データがあれば予約状況から、未収録時は設定画面の稼働率を使用
+    const pacingLumina = (endDate: string): number => {
+      if (lp.source === "api") {
+        const target = ds.luminaPacing.filter((m) => m.targetDate <= endDate);
+        return target.length > 0
+          ? target.filter((m) => m.isBooked).length / target.length
+          : 0;
+      }
+      return lp.occupancyOverride !== null ? lp.occupancyOverride / 100 : 0;
+    };
+    return {
+      adr: Math.round(adr),
+      occupancyRate: occ,
+      revpar: Math.round(adr * occ),
+      pacingOccupancy30: pacingLumina(pacing30End),
+      pacingOccupancy60: pacingLumina(pacingEnd),
+      pricePerGuest: Math.round(adr / Math.max(lp.maxGuests, 1)),
+      propertiesCount: 1,
+      luminaAdr: luminaAdr !== null ? Math.round(luminaAdr) : null,
+      luminaOccupancy: luminaOcc,
+      top20Adr: 0,
+      top20Revpar: 0,
+      top20Count: 0,
+      alos: null,
+      minStay2PlusShare: 0,
+      minStayDist: { n1: 0, n2: 0, n3plus: 0 },
+      weekendPremium: premium,
+      weekdayAdr: wkAdr,
+      preholidayAdr: phAdr,
+    };
+  })();
+
   // ---- 日別トレンド ----
   const byDate = new Map<string, { prices: number[]; booked: number; total: number }>();
   for (const m of dayFiltered) {
@@ -381,6 +431,7 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
   return {
     kpis,
     kpisTop20,
+    kpisLumina,
     visibleKpiCards: ds.visibleKpiCards,
     scatter,
     trend,

@@ -21,6 +21,7 @@ export interface Dataset {
   properties: Property[];
   metrics: DailyMetric[]; // 指定期間内のみ
   lumina: LuminaMetric[]; // 指定期間内のみ
+  luminaPacing: LuminaMetric[]; // 今後60日 (自物件のPacing KPI用)
   pacingMetrics: DailyMetric[]; // 今後60日 (Pacing KPI用、フィルタ済み物件のみで別途絞り込み)
   luminaProfile: LuminaProfile;
   visibleKpiCards: string[]; // 設定画面で選択された表示カードID (空 = 全て)
@@ -72,6 +73,7 @@ export async function loadDataset(
     properties: demo.properties,
     metrics: demo.metrics.filter((m) => inRange(m.targetDate, start, end)),
     lumina: demo.lumina.filter((m) => inRange(m.targetDate, start, end)),
+    luminaPacing: demo.lumina.filter((m) => inRange(m.targetDate, pacingStart, pacingEnd)),
     pacingMetrics: demo.metrics.filter((m) => inRange(m.targetDate, pacingStart, pacingEnd)),
     luminaProfile: {
       maxGuests: LUMINA_PROFILE.maxGuests,
@@ -102,7 +104,7 @@ async function loadFromTurso(
   if (!schemaReady) schemaReady = ensureSchema(db);
   await schemaReady;
 
-  const [propsRes, metricsRes, luminaRes, pacingRes, syncRes, luminaCfgRes] = await Promise.all([
+  const [propsRes, metricsRes, luminaRes, luminaPacingRes, pacingRes, syncRes, luminaCfgRes] = await Promise.all([
     // details_json は重いため一覧取得では読まない (物件詳細APIでのみ取得)
     db.execute(
       `SELECT id, airroi_id, airbnb_id, title, area, latitude, longitude, property_type,
@@ -119,6 +121,10 @@ async function loadFromTurso(
     db.execute({
       sql: "SELECT target_date, configured_price, is_booked, actual_revenue FROM lumina_fuji_metrics WHERE target_date BETWEEN ? AND ?",
       args: [start, end],
+    }),
+    db.execute({
+      sql: "SELECT target_date, configured_price, is_booked, actual_revenue FROM lumina_fuji_metrics WHERE target_date BETWEEN ? AND ?",
+      args: [pacingStart, pacingEnd],
     }),
     db.execute({
       sql: "SELECT property_id, target_date, price_jpy, is_available, min_nights FROM daily_metrics WHERE target_date BETWEEN ? AND ?",
@@ -184,6 +190,12 @@ async function loadFromTurso(
     })),
     metrics: metricsRes.rows.map((r) => toMetric(r as Record<string, unknown>)),
     lumina: luminaRes.rows.map((r) => ({
+      targetDate: String(r.target_date),
+      configuredPrice: Number(r.configured_price),
+      isBooked: Boolean(Number(r.is_booked)),
+      actualRevenue: Number(r.actual_revenue ?? 0),
+    })),
+    luminaPacing: luminaPacingRes.rows.map((r) => ({
       targetDate: String(r.target_date),
       configuredPrice: Number(r.configured_price),
       isBooked: Boolean(Number(r.is_booked)),

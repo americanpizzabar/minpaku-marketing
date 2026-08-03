@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { KPI_CARD_DEFS } from "@/lib/kpi-cards";
+import { KPI_CARD_DEFS, KPI_SEGMENTS } from "@/lib/kpi-cards";
 
 interface SettingsState {
   autoSync: boolean;
@@ -303,29 +303,36 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                 <p className="mb-2 text-[11px] font-semibold text-slate-500">
                   マーケット概況の表示カード (未選択 = 全て表示)
                 </p>
-                <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
-                  {KPI_CARD_DEFS.map((def) => (
-                    <label
-                      key={def.id}
-                      className="flex items-center gap-2 text-xs text-slate-700"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={form.kpiCards.includes(def.id)}
-                        onChange={(e) =>
-                          setForm({
-                            ...form,
-                            kpiCards: e.target.checked
-                              ? [...form.kpiCards, def.id]
-                              : form.kpiCards.filter((id) => id !== def.id),
-                          })
-                        }
-                        className="h-4 w-4 shrink-0 accent-indigo-600"
-                      />
-                      {def.label}
-                    </label>
-                  ))}
-                </div>
+                {KPI_SEGMENTS.map((seg) => (
+                  <div key={seg.id} className="mb-2">
+                    <p className="mb-1 text-[11px] font-semibold text-slate-600">
+                      {seg.label}
+                    </p>
+                    <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
+                      {KPI_CARD_DEFS.filter((def) => def.segment === seg.id).map((def) => (
+                        <label
+                          key={def.id}
+                          className="flex items-center gap-2 text-xs text-slate-700"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={form.kpiCards.includes(def.id)}
+                            onChange={(e) =>
+                              setForm({
+                                ...form,
+                                kpiCards: e.target.checked
+                                  ? [...form.kpiCards, def.id]
+                                  : form.kpiCards.filter((id) => id !== def.id),
+                              })
+                            }
+                            className="h-4 w-4 shrink-0 accent-indigo-600"
+                          />
+                          {def.label}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                ))}
               </div>
 
               <p className="text-xs text-slate-500">

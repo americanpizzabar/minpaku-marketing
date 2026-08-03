@@ -204,7 +204,7 @@ function CardGrid({
   return (
     <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
       <SortableContext items={items} strategy={rectSortingStrategy}>
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
+        <div className="grid grid-cols-2 gap-3 2xl:grid-cols-3">
           {ordered.map((c) => (
             <SortableCard key={c.id} id={c.id}>
               <Card label={c.label} value={c.value} sub={c.sub} accent={c.accent} />
@@ -263,31 +263,33 @@ export default function KpiCards({
   const topCards = buildCards(kpisTop20).filter((c) => c.id !== "top20" && isVisible(c.id));
 
   return (
-    <div className="flex flex-col gap-4">
-      <section className="rounded-2xl border border-slate-200 bg-slate-100/70 p-3">
-        <h3 className="mb-2 flex items-center gap-2 text-sm font-bold text-slate-800">
-          <span className="rounded-full bg-slate-600 px-2.5 py-0.5 text-[11px] font-semibold text-white">
-            全物件
-          </span>
-          <span className="font-normal text-slate-500">{kpis.propertiesCount}物件の集計</span>
-        </h3>
-        <CardGrid cards={allCards} order={order} onReorder={handleReorder} />
-      </section>
+    <div className="flex flex-col gap-2">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <section className="rounded-2xl border border-slate-200 bg-slate-100/70 p-3">
+          <h3 className="mb-2 flex flex-wrap items-center gap-2 text-sm font-bold text-slate-800">
+            <span className="rounded-full bg-slate-600 px-2.5 py-0.5 text-[11px] font-semibold text-white">
+              全物件
+            </span>
+            <span className="font-normal text-slate-500">{kpis.propertiesCount}物件の集計</span>
+          </h3>
+          <CardGrid cards={allCards} order={order} onReorder={handleReorder} />
+        </section>
 
-      <section className="rounded-2xl border border-amber-200 bg-amber-50/70 p-3">
-        <h3 className="mb-2 flex items-center gap-2 text-sm font-bold text-slate-800">
-          <span className="rounded-full bg-amber-500 px-2.5 py-0.5 text-[11px] font-semibold text-white">
-            上位20%のみ
-          </span>
-          <span className="font-normal text-slate-500">
-            ハイエンド層 — ADR上位{kpisTop20.propertiesCount}物件で再計算
-          </span>
-        </h3>
-        <CardGrid cards={topCards} order={order} onReorder={handleReorder} />
-      </section>
+        <section className="rounded-2xl border border-amber-200 bg-amber-50/70 p-3">
+          <h3 className="mb-2 flex flex-wrap items-center gap-2 text-sm font-bold text-slate-800">
+            <span className="rounded-full bg-amber-500 px-2.5 py-0.5 text-[11px] font-semibold text-white">
+              上位20%のみ
+            </span>
+            <span className="font-normal text-slate-500">
+              ハイエンド層 — ADR上位{kpisTop20.propertiesCount}物件で再計算
+            </span>
+          </h3>
+          <CardGrid cards={topCards} order={order} onReorder={handleReorder} />
+        </section>
+      </div>
 
-      <p className="-mt-2 text-right text-[11px] text-slate-400">
-        カード右上の ⠿ をドラッグすると並び替えできます (両セクションに反映・この端末に保存)
+      <p className="text-right text-[11px] text-slate-400">
+        カード右上の ⠿ をドラッグすると並び替えできます (左右両方に反映・この端末に保存)
       </p>
     </div>
   );

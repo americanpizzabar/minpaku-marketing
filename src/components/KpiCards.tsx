@@ -54,7 +54,12 @@ function Card({
   );
 }
 
-/** 長押しでドラッグ開始できる並び替え対応ラッパー */
+/**
+ * ドラッグハンドル (⠿) 方式の並び替えラッパー。
+ * カード全体を掴む方式はモバイルブラウザのスクロール介入でドラッグが
+ * 中断されるため、touch-action: none を適用した小さなハンドルに限定する
+ * (ハンドル以外はどこを触っても通常どおりスクロールできる)。
+ */
 function SortableCard({ id, children }: { id: string; children: React.ReactNode }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id,
@@ -62,18 +67,20 @@ function SortableCard({ id, children }: { id: string; children: React.ReactNode 
   return (
     <div
       ref={setNodeRef}
-      style={{
-        transform: CSS.Transform.toString(transform),
-        transition,
-        touchAction: "manipulation",
-        WebkitTouchCallout: "none",
-      }}
-      onContextMenu={(e) => e.preventDefault()}
-      {...attributes}
-      {...listeners}
-      className={`select-none ${isDragging ? "z-10 opacity-90 shadow-xl ring-2 ring-indigo-400" : ""}`}
+      style={{ transform: CSS.Transform.toString(transform), transition }}
+      className={`relative select-none ${isDragging ? "z-10 opacity-90 shadow-xl ring-2 ring-indigo-400" : ""}`}
     >
       {children}
+      <button
+        {...attributes}
+        {...listeners}
+        style={{ touchAction: "none", WebkitTouchCallout: "none" }}
+        onContextMenu={(e) => e.preventDefault()}
+        aria-label="ドラッグして並び替え"
+        className="absolute top-1.5 right-1.5 cursor-grab rounded px-1.5 py-0.5 text-sm leading-none text-slate-300 hover:bg-slate-100 hover:text-slate-500 active:cursor-grabbing"
+      >
+        ⠿
+      </button>
     </div>
   );
 }
@@ -178,9 +185,10 @@ function CardGrid({
   order: string[];
   onReorder: (activeId: string, overId: string) => void;
 }) {
+  // ハンドル方式のため長押し不要。誤操作防止に短い遅延のみ設定
   const sensors = useSensors(
-    useSensor(MouseSensor, { activationConstraint: { delay: 400, tolerance: 8 } }),
-    useSensor(TouchSensor, { activationConstraint: { delay: 400, tolerance: 8 } }),
+    useSensor(MouseSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 120, tolerance: 8 } }),
   );
 
   const byId = new Map(cards.map((c) => [c.id, c]));
@@ -256,23 +264,30 @@ export default function KpiCards({
 
   return (
     <div className="flex flex-col gap-4">
-      <div>
-        <h3 className="mb-2 text-sm font-bold text-slate-700">
-          全物件 <span className="font-normal text-slate-400">({kpis.propertiesCount}物件)</span>
+      <section className="rounded-2xl border border-slate-200 bg-slate-100/70 p-3">
+        <h3 className="mb-2 flex items-center gap-2 text-sm font-bold text-slate-800">
+          <span className="rounded-full bg-slate-600 px-2.5 py-0.5 text-[11px] font-semibold text-white">
+            全物件
+          </span>
+          <span className="font-normal text-slate-500">{kpis.propertiesCount}物件の集計</span>
         </h3>
         <CardGrid cards={allCards} order={order} onReorder={handleReorder} />
-      </div>
-      <div>
-        <h3 className="mb-2 text-sm font-bold text-slate-700">
-          上位20%のみ (ハイエンド層){" "}
-          <span className="font-normal text-slate-400">
-            (ADR上位{kpisTop20.propertiesCount}物件で再計算)
+      </section>
+
+      <section className="rounded-2xl border border-amber-200 bg-amber-50/70 p-3">
+        <h3 className="mb-2 flex items-center gap-2 text-sm font-bold text-slate-800">
+          <span className="rounded-full bg-amber-500 px-2.5 py-0.5 text-[11px] font-semibold text-white">
+            上位20%のみ
+          </span>
+          <span className="font-normal text-slate-500">
+            ハイエンド層 — ADR上位{kpisTop20.propertiesCount}物件で再計算
           </span>
         </h3>
         <CardGrid cards={topCards} order={order} onReorder={handleReorder} />
-      </div>
+      </section>
+
       <p className="-mt-2 text-right text-[11px] text-slate-400">
-        カードを長押しすると並び替えできます (両セクションに反映・この端末に保存)
+        カード右上の ⠿ をドラッグすると並び替えできます (両セクションに反映・この端末に保存)
       </p>
     </div>
   );

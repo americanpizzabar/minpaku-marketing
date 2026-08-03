@@ -86,29 +86,17 @@ interface CardDef {
   accent?: "up" | "down" | null;
 }
 
-export default function KpiCards({
-  kpis: kpisAll,
-  kpisTop20,
-  visibleCards = [],
-}: {
-  kpis: Kpis;
-  kpisTop20: Kpis;
-  visibleCards?: string[];
-}) {
-  // 全物件 / ADR上位20% (ハイエンド層) の集計セグメント切替
-  const [segment, setSegment] = useState<"all" | "top20">("all");
-  const kpis = segment === "top20" ? kpisTop20 : kpisAll;
-
+/** KPIセットからカード定義を組み立てる (全物件/上位20%の両セクションで共用) */
+function buildCards(kpis: Kpis): CardDef[] {
   const luminaDiff =
     kpis.luminaAdr !== null && kpis.adr > 0
       ? ((kpis.luminaAdr - kpis.adr) / kpis.adr) * 100
       : null;
-
   const dist = kpis.minStayDist;
   const distTotal = dist.n1 + dist.n2 + dist.n3plus;
   const pct = (n: number) => (distTotal > 0 ? Math.round((n / distTotal) * 100) : 0);
 
-  const cards: CardDef[] = [
+  return [
     {
       id: "adr",
       label: "平均客室単価 (ADR)",
@@ -178,8 +166,58 @@ export default function KpiCards({
       sub: `1泊OK ${pct(dist.n1)}% / 2泊 ${pct(dist.n2)}% / 3泊+ ${pct(dist.n3plus)}%`,
     },
   ];
+}
 
-  const defaultOrder = cards.map((c) => c.id);
+/** 1セグメント分のカードグリッド (長押し並び替え対応) */
+function CardGrid({
+  cards,
+  order,
+  onReorder,
+}: {
+  cards: CardDef[];
+  order: string[];
+  onReorder: (activeId: string, overId: string) => void;
+}) {
+  const sensors = useSensors(
+    useSensor(MouseSensor, { activationConstraint: { delay: 400, tolerance: 8 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 400, tolerance: 8 } }),
+  );
+
+  const byId = new Map(cards.map((c) => [c.id, c]));
+  const ordered = order.map((id) => byId.get(id)).filter((c): c is CardDef => Boolean(c));
+  const items = ordered.map((c) => c.id);
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    onReorder(String(active.id), String(over.id));
+  };
+
+  return (
+    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+      <SortableContext items={items} strategy={rectSortingStrategy}>
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
+          {ordered.map((c) => (
+            <SortableCard key={c.id} id={c.id}>
+              <Card label={c.label} value={c.value} sub={c.sub} accent={c.accent} />
+            </SortableCard>
+          ))}
+        </div>
+      </SortableContext>
+    </DndContext>
+  );
+}
+
+export default function KpiCards({
+  kpis,
+  kpisTop20,
+  visibleCards = [],
+}: {
+  kpis: Kpis;
+  kpisTop20: Kpis;
+  visibleCards?: string[];
+}) {
+  const defaultOrder = buildCards(kpis).map((c) => c.id);
   const [order, setOrder] = useState<string[]>(defaultOrder);
 
   // 端末に保存された並び順を復元 (新しいカードは末尾に追加)
@@ -199,23 +237,9 @@ export default function KpiCards({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 長押し (400ms) でドラッグ開始。それ未満の操作はスクロール等に譲る。
-  // PointerSensorはモバイルでドラッグ中にブラウザのスクロールが介入して
-  // pointercancelで解除されるため、touchmoveを抑止できるTouchSensorを使う。
-  const sensors = useSensors(
-    useSensor(MouseSensor, { activationConstraint: { delay: 400, tolerance: 8 } }),
-    useSensor(TouchSensor, { activationConstraint: { delay: 400, tolerance: 8 } }),
-  );
-
-  const handleDragEnd = (event: DragEndEvent) => {
-    const { active, over } = event;
-    if (!over || active.id === over.id) return;
+  const handleReorder = (activeId: string, overId: string) => {
     setOrder((current) => {
-      const next = arrayMove(
-        current,
-        current.indexOf(String(active.id)),
-        current.indexOf(String(over.id)),
-      );
+      const next = arrayMove(current, current.indexOf(activeId), current.indexOf(overId));
       try {
         localStorage.setItem(ORDER_KEY, JSON.stringify(next));
       } catch {
@@ -225,53 +249,30 @@ export default function KpiCards({
     });
   };
 
-  const byId = new Map(cards.map((c) => [c.id, c]));
-  const ordered = order
-    .map((id) => byId.get(id))
-    .filter((c): c is CardDef => Boolean(c))
-    // 設定画面で選択されたカードのみ表示 (未設定 = 全て表示)
-    .filter((c) => visibleCards.length === 0 || visibleCards.includes(c.id));
+  const isVisible = (id: string) => visibleCards.length === 0 || visibleCards.includes(id);
+  const allCards = buildCards(kpis).filter((c) => isVisible(c.id));
+  // 上位20%セクションでは「上位20% ADR」カードは重複 (=そのセクションのADR) のため除外
+  const topCards = buildCards(kpisTop20).filter((c) => c.id !== "top20" && isVisible(c.id));
 
   return (
-    <div>
-      <div className="mb-2 flex items-center gap-1">
-        {(
-          [
-            ["all", `全物件 (${kpisAll.propertiesCount})`],
-            ["top20", `上位20%のみ (${kpisTop20.propertiesCount})`],
-          ] as const
-        ).map(([value, label]) => (
-          <button
-            key={value}
-            onClick={() => setSegment(value)}
-            className={`rounded-full px-3 py-1 text-xs font-medium transition ${
-              segment === value
-                ? "bg-indigo-600 text-white"
-                : "bg-slate-100 text-slate-600 hover:bg-slate-200"
-            }`}
-          >
-            {label}
-          </button>
-        ))}
-        {segment === "top20" && (
-          <span className="text-[11px] text-slate-400">
-            ADR上位20%のハイエンド層だけで全指標を再計算しています
-          </span>
-        )}
+    <div className="flex flex-col gap-4">
+      <div>
+        <h3 className="mb-2 text-sm font-bold text-slate-700">
+          全物件 <span className="font-normal text-slate-400">({kpis.propertiesCount}物件)</span>
+        </h3>
+        <CardGrid cards={allCards} order={order} onReorder={handleReorder} />
       </div>
-      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-        <SortableContext items={order} strategy={rectSortingStrategy}>
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
-            {ordered.map((c) => (
-              <SortableCard key={c.id} id={c.id}>
-                <Card label={c.label} value={c.value} sub={c.sub} accent={c.accent} />
-              </SortableCard>
-            ))}
-          </div>
-        </SortableContext>
-      </DndContext>
-      <p className="mt-1.5 text-right text-[11px] text-slate-400">
-        カードを長押しすると並び替えできます (並び順はこの端末に保存されます)
+      <div>
+        <h3 className="mb-2 text-sm font-bold text-slate-700">
+          上位20%のみ (ハイエンド層){" "}
+          <span className="font-normal text-slate-400">
+            (ADR上位{kpisTop20.propertiesCount}物件で再計算)
+          </span>
+        </h3>
+        <CardGrid cards={topCards} order={order} onReorder={handleReorder} />
+      </div>
+      <p className="-mt-2 text-right text-[11px] text-slate-400">
+        カードを長押しすると並び替えできます (両セクションに反映・この端末に保存)
       </p>
     </div>
   );

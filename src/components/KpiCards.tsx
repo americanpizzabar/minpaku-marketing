@@ -123,10 +123,6 @@ function SortableCard({ id, children }: { id: string; children: React.ReactNode 
 
 /** 指定セグメントのKPIセットからカード定義を組み立てる */
 function buildSegmentCards(kpis: Kpis, segment: KpiSegmentId): CardDef[] {
-  const luminaDiff =
-    kpis.luminaAdr !== null && kpis.adr > 0
-      ? ((kpis.luminaAdr - kpis.adr) / kpis.adr) * 100
-      : null;
   const dist = kpis.minStayDist;
   const distTotal = dist.n1 + dist.n2 + dist.n3plus;
   const pct = (n: number) => (distTotal > 0 ? Math.round((n / distTotal) * 100) : 0);
@@ -154,22 +150,6 @@ function buildSegmentCards(kpis: Kpis, segment: KpiSegmentId): CardDef[] {
       value: formatJpy(kpis.pricePerGuest),
       sub: "1泊料金 ÷ 収容定員",
     },
-    lumina: isOwn
-      ? {
-          label: "Lumina Fuji 差異",
-          value: "—",
-          sub: "自物件のため対象外",
-        }
-      : {
-          label: "Lumina Fuji 差異",
-          value:
-            luminaDiff !== null ? `${luminaDiff >= 0 ? "+" : ""}${luminaDiff.toFixed(1)}%` : "—",
-          sub:
-            kpis.luminaAdr !== null
-              ? `自社ADR ${formatJpy(kpis.luminaAdr)} との比較`
-              : "自社データ未登録",
-          accent: luminaDiff !== null ? (luminaDiff >= 0 ? "up" : "down") : null,
-        },
     alos: {
       label: "平均滞在日数 (ALOS)",
       value: kpis.alos !== null ? `${kpis.alos}泊` : "—",

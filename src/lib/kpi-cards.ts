@@ -6,7 +6,6 @@ export const KPI_METRICS = [
   { id: "revpar", label: "RevPAR" },
   { id: "pacing", label: "Pacing 稼働率" },
   { id: "ppg", label: "1人当たり平均単価" },
-  { id: "lumina", label: "Lumina Fuji 差異" },
   { id: "alos", label: "平均滞在日数 (ALOS)" },
   { id: "weekend", label: "週末プレミアム" },
   { id: "minstay", label: "最低2泊以上の物件" },
@@ -24,18 +23,18 @@ export const KPI_SEGMENTS: {
   {
     id: "all",
     label: "全物件",
-    metricIds: ["adr", "occupancy", "revpar", "pacing", "ppg", "lumina", "alos", "weekend", "minstay"],
+    metricIds: ["adr", "occupancy", "revpar", "pacing", "ppg", "alos", "weekend", "minstay"],
   },
   {
     id: "top",
     label: "上位20%",
-    metricIds: ["adr", "occupancy", "revpar", "pacing", "ppg", "lumina", "alos", "weekend", "minstay"],
+    metricIds: ["adr", "occupancy", "revpar", "pacing", "ppg", "alos", "weekend", "minstay"],
   },
   {
     id: "own",
     label: "Lumina Fuji",
-    // 行揃えのため全指標を持つ (差異/ALOS/最低泊数は自物件ではプレースホルダ表示)
-    metricIds: ["adr", "occupancy", "revpar", "pacing", "ppg", "lumina", "alos", "weekend", "minstay"],
+    // 行揃えのため全指標を持つ (ALOS/最低泊数は自物件ではプレースホルダ表示)
+    metricIds: ["adr", "occupancy", "revpar", "pacing", "ppg", "alos", "weekend", "minstay"],
   },
 ];
 

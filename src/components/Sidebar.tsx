@@ -114,6 +114,7 @@ export default function Sidebar({ dataSource }: { dataSource: "turso" | "demo" }
             [
               ["/", "📊 ダッシュボード"],
               ["/map", "🗺 地図"],
+              ["/database", "🗄 データ"],
               ["/settings", "⚙ 設定"],
             ] as const
           ).map(([href, label]) => (

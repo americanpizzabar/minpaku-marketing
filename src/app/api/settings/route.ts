@@ -8,6 +8,7 @@ import {
   ALL_AREAS,
 } from "@/lib/airroi";
 import { KPI_CARD_DEFS } from "@/lib/kpi-cards";
+import { TABLE_COLUMN_IDS } from "@/lib/table-columns";
 import { ensureSchema, getDb } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
@@ -54,7 +55,20 @@ export async function GET(request: NextRequest) {
         params.get("luminaOccupancy") === "none" ? null : numParam("luminaOccupancy", 0, 100),
       luminaLat: floatParam("luminaLat", 20, 46),
       luminaLng: floatParam("luminaLng", 122, 154),
+      dataMode:
+        params.get("dataMode") === "actual"
+          ? "actual"
+          : params.get("dataMode") === "calendar"
+            ? "calendar"
+            : undefined,
+      ratesSubsetSize: numParam("ratesSubsetSize", 0, 1000),
     });
+    const cols = params.get("tableColumns");
+    if (cols !== null) {
+      await saveSyncConfig(db, {
+        tableColumns: cols.split(",").map((s) => s.trim()).filter((id) => TABLE_COLUMN_IDS.includes(id)),
+      });
+    }
     if (params.get("luminaListingId") !== null || params.get("luminaBasePrice") !== null) {
       await db.execute("DELETE FROM sync_state WHERE key = 'lumina_rates_at'");
     }
@@ -69,12 +83,7 @@ export async function GET(request: NextRequest) {
     configured: true,
     config,
     trackedProperties,
-    estimatedMonthlyCostUsd: estimateMonthlyCost(
-      trackedProperties,
-      config.ratesRefreshDays,
-      config.searchRefreshDays,
-      config.autoSync,
-    ),
+    estimatedMonthlyCostUsd: estimateMonthlyCost(trackedProperties, config),
   });
 }
 
@@ -139,6 +148,12 @@ export async function POST(request: NextRequest) {
           .map(String)
           .filter((id) => KPI_CARD_DEFS.some((d) => d.id === id))
       : undefined,
+    tableColumns: Array.isArray(body.tableColumns)
+      ? (body.tableColumns as unknown[]).map(String).filter((id) => TABLE_COLUMN_IDS.includes(id))
+      : undefined,
+    dataMode:
+      body.dataMode === "actual" ? "actual" : body.dataMode === "calendar" ? "calendar" : undefined,
+    ratesSubsetSize: numField(body.ratesSubsetSize, 0, 1000),
   });
 
   const config = await getSyncConfig(db);
@@ -163,27 +178,30 @@ export async function POST(request: NextRequest) {
     saved: true,
     config,
     trackedProperties,
-    estimatedMonthlyCostUsd: estimateMonthlyCost(
-      trackedProperties,
-      config.ratesRefreshDays,
-      config.searchRefreshDays,
-      config.autoSync,
-    ),
+    estimatedMonthlyCostUsd: estimateMonthlyCost(trackedProperties, config),
   });
 }
 
 function estimateMonthlyCost(
   trackedProperties: number,
-  ratesRefreshDays: number,
-  searchRefreshDays: number,
-  autoSync: boolean,
+  config: {
+    autoSync: boolean;
+    ratesRefreshDays: number;
+    searchRefreshDays: number;
+    dataMode: "actual" | "calendar";
+    ratesSubsetSize: number;
+  },
 ): number {
-  if (!autoSync) return 0;
-  // 料金カレンダー: 物件数 ÷ 更新周期 × 30日分 + 自物件1件
-  const ratesPerMonth = (trackedProperties / Math.max(ratesRefreshDays, 1)) * 30 + 30 / Math.max(ratesRefreshDays, 1);
-  // カタログ: エリアごとに (物件上限 ÷ ページサイズ10) 回の検索を周期ごとに実行
+  if (!config.autoSync) return 0;
+  // actualモードは自物件＋近似競合の一部のみカレンダー取得、calendarは全物件
+  const ratesTargets =
+    config.dataMode === "actual"
+      ? Math.min(config.ratesSubsetSize, trackedProperties) + 1 // +1 = 自物件
+      : trackedProperties + 1;
+  const ratesPerMonth = (ratesTargets / Math.max(config.ratesRefreshDays, 1)) * 30;
+  // カタログ(検索)は全物件を取得: エリアごとに (物件上限 ÷ ページサイズ10) 回
   const searchesPerRefresh = ALL_AREAS.length * 10;
-  const searchPerMonth = (searchesPerRefresh / Math.max(searchRefreshDays, 1)) * 30;
+  const searchPerMonth = (searchesPerRefresh / Math.max(config.searchRefreshDays, 1)) * 30;
   return (
     Math.round(
       (ratesPerMonth * COST_PER_RATES_CALL + searchPerMonth * COST_PER_SEARCH_CALL) * 100,

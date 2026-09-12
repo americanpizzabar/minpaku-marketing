@@ -122,6 +122,7 @@ const PROPERTY_EXTRA_COLUMNS: [string, string][] = [
   ["ttm_revpar", "REAL"],
   ["ttm_revenue", "REAL"],
   ["ttm_avg_length_of_stay", "REAL"],
+  ["ttm_avg_min_nights", "REAL"],
   ["details_json", "TEXT"],
 ];
 

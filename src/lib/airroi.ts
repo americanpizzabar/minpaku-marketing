@@ -48,6 +48,10 @@ export interface SyncConfig {
   luminaLat: number | null; // 自物件の緯度 (地図マーカー位置, null=未設定)
   luminaLng: number | null; // 自物件の経度
   kpiCards: string[]; // マーケット概況の表示カードID (空 = 全て表示)
+  tableColumns: string[]; // 競合物件一覧の表示列ID (空 = 既定列)
+  // actual=実績ベース(検索実績中心・低コスト) / calendar=全物件カレンダー(現行・高コスト)
+  dataMode: "actual" | "calendar";
+  ratesSubsetSize: number; // actualモードで future/rates を取得する近似競合の件数
 }
 
 /** Webアプリの設定画面で保存された値 (sync_state) を環境変数既定値とマージして返す */
@@ -84,6 +88,12 @@ export async function getSyncConfig(db: Client): Promise<SyncConfig> {
       return Number.isFinite(n) && n !== 0 ? n : null;
     })(),
     kpiCards: (map.get("config:kpi_cards") ?? "").split(",").filter(Boolean),
+    tableColumns: (map.get("config:table_columns") ?? "").split(",").filter(Boolean),
+    dataMode: map.get("config:data_mode") === "calendar" ? "calendar" : "actual",
+    ratesSubsetSize: numOr(
+      "config:rates_subset_size",
+      Number(process.env.AIRROI_RATES_SUBSET_SIZE ?? 40),
+    ),
   };
 }
 
@@ -112,6 +122,11 @@ export async function saveSyncConfig(db: Client, config: Partial<SyncConfig>): P
     entries.push(["config:lumina_lng", config.luminaLng === null ? "" : String(config.luminaLng)]);
   if (config.kpiCards !== undefined)
     entries.push(["config:kpi_cards", config.kpiCards.join(",")]);
+  if (config.tableColumns !== undefined)
+    entries.push(["config:table_columns", config.tableColumns.join(",")]);
+  if (config.dataMode !== undefined) entries.push(["config:data_mode", config.dataMode]);
+  if (config.ratesSubsetSize !== undefined)
+    entries.push(["config:rates_subset_size", String(config.ratesSubsetSize)]);
   for (const [key, value] of entries) {
     await db.execute({
       sql: `INSERT INTO sync_state (key, value) VALUES (?, ?)
@@ -282,8 +297,8 @@ async function refreshAreaCatalog(
               guest_favorite, beds, host_name, cover_photo_url,
               l90d_occupancy, l90d_avg_rate, l90d_revpar, l90d_revenue,
               ttm_occupancy, ttm_avg_rate, ttm_revpar, ttm_revenue, ttm_avg_length_of_stay,
-              details_json, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+              ttm_avg_min_nights, details_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(id) DO UPDATE SET
               title=excluded.title, rating=excluded.rating, reviews_count=excluded.reviews_count,
               max_guests=excluded.max_guests, bedrooms=excluded.bedrooms,
@@ -298,6 +313,7 @@ async function refreshAreaCatalog(
               ttm_occupancy=excluded.ttm_occupancy, ttm_avg_rate=excluded.ttm_avg_rate,
               ttm_revpar=excluded.ttm_revpar, ttm_revenue=excluded.ttm_revenue,
               ttm_avg_length_of_stay=excluded.ttm_avg_length_of_stay,
+              ttm_avg_min_nights=excluded.ttm_avg_min_nights,
               details_json=excluded.details_json,
               updated_at=CURRENT_TIMESTAMP`,
       args: [
@@ -334,6 +350,7 @@ async function refreshAreaCatalog(
         num(item.ttm_revpar),
         num(item.ttm_revenue),
         num(item.ttm_avg_length_of_stay),
+        num(pick(item, ["ttm_avg_min_nights", "l90d_avg_min_nights"])),
         JSON.stringify(raw),
       ],
     });
@@ -530,6 +547,33 @@ export async function refreshLuminaRates(
  * - 料金が ratesRefreshDays より古い物件を古い順に更新 (capRemaining 件まで)
  * 時間予算内に終わらなかった分は PARTIAL で返し、呼び出し側がチェーンで継続する。
  */
+/**
+ * actualモードで future/rates を取得する対象物件のID一覧を返す。
+ * 自物件 (Lumina) の緯度経度が設定されていれば距離の近い順、
+ * 未設定なら定員が近い順に ratesSubsetSize 件を選ぶ (自物件と比較しやすい競合)。
+ */
+export async function selectRatesSubsetIds(db: Client, config: SyncConfig): Promise<string[]> {
+  const size = Math.max(0, Math.floor(config.ratesSubsetSize));
+  if (size === 0) return [];
+  let order: string;
+  const args: number[] = [];
+  if (config.luminaLat !== null && config.luminaLng !== null) {
+    // 平面近似の二乗距離 (経度は緯度でスケール補正)
+    order = `((latitude - ?) * (latitude - ?)) + ((longitude - ?) * (longitude - ?) * 0.65)`;
+    args.push(config.luminaLat, config.luminaLat, config.luminaLng, config.luminaLng);
+  } else {
+    order = `ABS(max_guests - ?)`;
+    args.push(config.luminaMaxGuests);
+  }
+  const res = await db.execute({
+    sql: `SELECT id FROM properties
+          WHERE id LIKE 'airroi_%' AND latitude IS NOT NULL
+          ORDER BY ${order} ASC LIMIT ?`,
+    args: [...args, size],
+  });
+  return res.rows.map((r) => String(r.id));
+}
+
 export async function syncStep(
   db: Client,
   syncType: "cron_daily" | "manual_refresh",
@@ -620,8 +664,23 @@ export async function syncStep(
       }
     }
 
-    // 3. 料金カレンダーが古い物件を古い順に更新
-    const staleCondition = `id LIKE 'airroi_%' AND (rates_synced_at IS NULL OR rates_synced_at < datetime('now', ?))`;
+    // 3. 料金カレンダーが古い物件を古い順に更新。
+    //    actualモードでは自物件に近い上位N件のみ (コスト削減)。calendarモードは全物件。
+    let subsetClause = "";
+    const subsetArgs: string[] = [];
+    if (config.dataMode === "actual") {
+      const subsetIds = await selectRatesSubsetIds(db, config);
+      if (subsetIds.length === 0) {
+        // 対象0件 = カレンダー取得なし。実績のみで運用
+        subsetClause = " AND 0";
+      } else {
+        subsetClause = ` AND id IN (${subsetIds.map(() => "?").join(",")})`;
+        subsetArgs.push(...subsetIds);
+      }
+    }
+    const staleCondition =
+      `id LIKE 'airroi_%' AND (rates_synced_at IS NULL OR rates_synced_at < datetime('now', ?))` +
+      subsetClause;
     const staleArg = `-${config.ratesRefreshDays} days`;
     while (
       (capRemaining === null || capRemaining > 0) &&
@@ -630,7 +689,7 @@ export async function syncStep(
       const limit = capRemaining === null ? CONCURRENCY : Math.min(CONCURRENCY, capRemaining);
       const staleRes = await db.execute({
         sql: `SELECT id, airroi_id, max_guests FROM properties WHERE ${staleCondition} ORDER BY rates_synced_at ASC LIMIT ?`,
-        args: [staleArg, limit],
+        args: [staleArg, ...subsetArgs, limit],
       });
       if (staleRes.rows.length === 0) break;
       const results = await Promise.all(
@@ -651,7 +710,7 @@ export async function syncStep(
     // 4. 残作業を数えて状態を決める
     const remainRes = await db.execute({
       sql: `SELECT COUNT(*) AS c FROM properties WHERE ${staleCondition}`,
-      args: [staleArg],
+      args: [staleArg, ...subsetArgs],
     });
     const ratesRemaining = Number(remainRes.rows[0]?.c ?? 0);
     const capExhausted = capRemaining !== null && capRemaining <= 0;

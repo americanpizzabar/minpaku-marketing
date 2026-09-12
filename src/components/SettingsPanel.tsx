@@ -17,6 +17,8 @@ interface SettingsState {
   luminaLat: string; // 文字列で保持 ("" = 未設定)
   luminaLng: string;
   kpiCards: string[]; // 表示するKPIカードID (空 = 全て表示)
+  dataMode: "actual" | "calendar";
+  ratesSubsetSize: number;
 }
 
 function toFormState(config: Record<string, unknown>): SettingsState {
@@ -36,6 +38,8 @@ function toFormState(config: Record<string, unknown>): SettingsState {
     luminaLat: config.luminaLat == null ? "" : String(config.luminaLat),
     luminaLng: config.luminaLng == null ? "" : String(config.luminaLng),
     kpiCards: Array.isArray(config.kpiCards) ? (config.kpiCards as string[]) : [],
+    dataMode: config.dataMode === "calendar" ? "calendar" : "actual",
+    ratesSubsetSize: Number(config.ratesSubsetSize ?? 40),
   };
 }
 
@@ -159,6 +163,50 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                   className="h-4 w-4 accent-indigo-600"
                 />
               </label>
+
+              <div className="rounded-lg bg-slate-50 p-2.5">
+                <label className={labelClass}>データ取得モード</label>
+                <div className="flex flex-col gap-1.5">
+                  {(
+                    [
+                      ["actual", "実績ベース (推奨・低コスト)", "全競合のADR・稼働率は検索の実績値から算出。カレンダーは自物件＋近似競合の一部のみ取得"],
+                      ["calendar", "全物件カレンダー (高コスト)", "全物件のカレンダーを取得して算出 (従来方式)"],
+                    ] as const
+                  ).map(([val, label, desc]) => (
+                    <label key={val} className="flex items-start gap-2 text-sm text-slate-700">
+                      <input
+                        type="radio"
+                        name="dataMode"
+                        checked={form.dataMode === val}
+                        onChange={() => setForm({ ...form, dataMode: val })}
+                        className="mt-0.5 h-4 w-4 accent-indigo-600"
+                      />
+                      <span>
+                        {label}
+                        <span className="block text-[11px] text-slate-400">{desc}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                {form.dataMode === "actual" && (
+                  <div className="mt-2">
+                    <label className={labelClass}>カレンダー取得対象数 (将来分析用の近似競合)</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={500}
+                      className={inputClass}
+                      value={form.ratesSubsetSize}
+                      onChange={(e) =>
+                        setForm({ ...form, ratesSubsetSize: Number(e.target.value) || 0 })
+                      }
+                    />
+                    <p className="mt-1 text-[11px] text-slate-400">
+                      日別トレンド・ペーシング・週末プレミアム等はこの件数の物件でカバーされます
+                    </p>
+                  </div>
+                )}
+              </div>
 
               <div>
                 <label className={labelClass}>料金カレンダーの更新周期</label>

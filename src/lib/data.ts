@@ -25,6 +25,9 @@ export interface Dataset {
   pacingMetrics: DailyMetric[]; // 今後60日 (Pacing KPI用、フィルタ済み物件のみで別途絞り込み)
   luminaProfile: LuminaProfile;
   visibleKpiCards: string[]; // 設定画面で選択された表示カードID (空 = 全て)
+  visibleTableColumns: string[]; // 競合物件一覧の表示列ID (空 = 既定列)
+  dataMode: "actual" | "calendar"; // データ取得モード
+  calendarCount: number; // カレンダー(daily_metrics)を保持する物件数
   dataSource: "turso" | "demo";
   lastSyncedAt: string | null;
 }
@@ -85,6 +88,9 @@ export async function loadDataset(
       lng: null,
     },
     visibleKpiCards: [],
+    visibleTableColumns: [],
+    dataMode: "calendar",
+    calendarCount: demo.properties.length,
     dataSource: "demo",
     lastSyncedAt: null,
   };
@@ -104,14 +110,16 @@ async function loadFromTurso(
   if (!schemaReady) schemaReady = ensureSchema(db);
   await schemaReady;
 
-  const [propsRes, metricsRes, luminaRes, luminaPacingRes, pacingRes, syncRes, luminaCfgRes] = await Promise.all([
+  const [propsRes, metricsRes, luminaRes, luminaPacingRes, pacingRes, syncRes, luminaCfgRes, calCountRes] = await Promise.all([
     // details_json は重いため一覧取得では読まない (物件詳細APIでのみ取得)
     db.execute(
       `SELECT id, airroi_id, airbnb_id, title, area, latitude, longitude, property_type,
               max_guests, bedrooms, bathrooms, area_sqm, rating, reviews_count, url,
-              cleaning_fee, superhost, instant_book, guest_favorite, beds, host_name,
-              l90d_occupancy, l90d_avg_rate, l90d_revpar,
-              ttm_occupancy, ttm_avg_rate, ttm_revpar, ttm_avg_length_of_stay
+              cleaning_fee, extra_guest_fee, superhost, instant_book, professional_management,
+              guest_favorite, beds, host_name, cover_photo_url,
+              l90d_occupancy, l90d_avg_rate, l90d_revpar, l90d_revenue,
+              ttm_occupancy, ttm_avg_rate, ttm_revpar, ttm_revenue,
+              ttm_avg_length_of_stay, ttm_avg_min_nights
        FROM properties`,
     ),
     db.execute({
@@ -134,7 +142,10 @@ async function loadFromTurso(
       "SELECT created_at FROM sync_logs WHERE status = 'SUCCESS' ORDER BY created_at DESC LIMIT 1",
     ),
     db.execute(
-      "SELECT key, value FROM sync_state WHERE key LIKE 'config:lumina%' OR key = 'lumina_source' OR key = 'config:kpi_cards'",
+      "SELECT key, value FROM sync_state WHERE key LIKE 'config:lumina%' OR key = 'lumina_source' OR key = 'config:kpi_cards' OR key = 'config:table_columns' OR key = 'config:data_mode'",
+    ),
+    db.execute(
+      "SELECT COUNT(DISTINCT property_id) AS c FROM daily_metrics",
     ),
   ]);
 
@@ -175,18 +186,25 @@ async function loadFromTurso(
       reviewsCount: Number(r.reviews_count ?? 0),
       url: r.url ? String(r.url) : null,
       cleaningFee: r.cleaning_fee != null ? Number(r.cleaning_fee) : null,
+      extraGuestFee: r.extra_guest_fee != null ? Number(r.extra_guest_fee) : null,
       superhost: r.superhost != null ? Boolean(Number(r.superhost)) : null,
       instantBook: r.instant_book != null ? Boolean(Number(r.instant_book)) : null,
+      professionalManagement:
+        r.professional_management != null ? Boolean(Number(r.professional_management)) : null,
       guestFavorite: r.guest_favorite != null ? Boolean(Number(r.guest_favorite)) : null,
       beds: r.beds != null ? Number(r.beds) : null,
       hostName: r.host_name ? String(r.host_name) : null,
+      coverPhotoUrl: r.cover_photo_url ? String(r.cover_photo_url) : null,
       l90dOccupancy: r.l90d_occupancy != null ? Number(r.l90d_occupancy) : null,
       l90dAvgRate: r.l90d_avg_rate != null ? Number(r.l90d_avg_rate) : null,
       l90dRevpar: r.l90d_revpar != null ? Number(r.l90d_revpar) : null,
+      l90dRevenue: r.l90d_revenue != null ? Number(r.l90d_revenue) : null,
       ttmOccupancy: r.ttm_occupancy != null ? Number(r.ttm_occupancy) : null,
       ttmAvgRate: r.ttm_avg_rate != null ? Number(r.ttm_avg_rate) : null,
       ttmRevpar: r.ttm_revpar != null ? Number(r.ttm_revpar) : null,
+      ttmRevenue: r.ttm_revenue != null ? Number(r.ttm_revenue) : null,
       ttmAvgLos: r.ttm_avg_length_of_stay != null ? Number(r.ttm_avg_length_of_stay) : null,
+      ttmAvgMinNights: r.ttm_avg_min_nights != null ? Number(r.ttm_avg_min_nights) : null,
     })),
     metrics: metricsRes.rows.map((r) => toMetric(r as Record<string, unknown>)),
     lumina: luminaRes.rows.map((r) => ({
@@ -212,6 +230,9 @@ async function loadFromTurso(
       lng: cfgNum("config:lumina_lng"),
     },
     visibleKpiCards: (luminaCfg.get("config:kpi_cards") ?? "").split(",").filter(Boolean),
+    visibleTableColumns: (luminaCfg.get("config:table_columns") ?? "").split(",").filter(Boolean),
+    dataMode: luminaCfg.get("config:data_mode") === "calendar" ? "calendar" : "actual",
+    calendarCount: Number(calCountRes.rows[0]?.c ?? 0),
     dataSource: "turso",
     lastSyncedAt: syncRes.rows[0] ? String(syncRes.rows[0].created_at) : null,
   };

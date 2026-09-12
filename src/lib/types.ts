@@ -83,19 +83,25 @@ export interface Property {
   url: string | null;
   // ---- カタログ検索から取得する追加属性 ----
   cleaningFee: number | null;
+  extraGuestFee: number | null;
   superhost: boolean | null;
   instantBook: boolean | null;
+  professionalManagement: boolean | null;
   guestFavorite: boolean | null;
   beds: number | null;
   hostName: string | null;
+  coverPhotoUrl: string | null;
   // 過去実績 (l90d=過去90日, ttm=過去12ヶ月)。稼働率は%表記
   l90dOccupancy: number | null;
   l90dAvgRate: number | null;
   l90dRevpar: number | null;
+  l90dRevenue: number | null;
   ttmOccupancy: number | null;
   ttmAvgRate: number | null;
   ttmRevpar: number | null;
+  ttmRevenue: number | null;
   ttmAvgLos: number | null; // 過去12ヶ月の平均滞在日数
+  ttmAvgMinNights: number | null; // 過去12ヶ月の平均最低泊数
 }
 
 export interface DailyMetric {
@@ -175,25 +181,45 @@ export interface BenchmarkPoint {
   lumina: number | null;
 }
 
+export type DataBasis = "calendar" | "actual";
+
 export interface PropertyRow {
   id: string;
   airroiId: string;
+  airbnbId: string | null;
   title: string;
   area: string;
   propertyType: PropertyType;
   bedrooms: number;
+  beds: number | null;
+  bathrooms: number | null;
   maxGuests: number;
+  areaSqm: number | null; // 部屋面積 (m²)
   rating: number | null;
   reviewsCount: number;
   occupancyRate: number; // 0-100 (%)
   adr: number;
   pricePerGuest: number;
   minNights: number; // 期間内で最も多い最低泊数
-  areaSqm: number | null; // 部屋面積 (m²)
+  dataBasis: DataBasis; // adr/occ の算出元 (calendar=カレンダー / actual=検索実績)
   cleaningFee: number | null;
+  extraGuestFee: number | null;
   superhost: boolean | null;
-  l90dOccupancy: number | null; // 過去90日の実績稼働率 (%)
-  l90dAvgRate: number | null; // 過去90日の実績平均単価
+  instantBook: boolean | null;
+  professionalManagement: boolean | null;
+  guestFavorite: boolean | null;
+  hostName: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  // 過去実績 (l90d=過去90日, ttm=過去12ヶ月)
+  l90dOccupancy: number | null;
+  l90dAvgRate: number | null;
+  l90dRevpar: number | null;
+  ttmOccupancy: number | null;
+  ttmAvgRate: number | null;
+  ttmRevpar: number | null;
+  ttmAvgLos: number | null;
+  ttmAvgMinNights: number | null;
   url: string | null;
 }
 
@@ -220,6 +246,9 @@ export interface DashboardData {
   kpisTop20: Kpis; // ADR上位20% (ハイエンド層) のみで再計算した同指標
   kpisLumina: Kpis; // Lumina Fuji 単体の同指標
   visibleKpiCards: string[]; // 設定画面で選択された表示カードID (空 = 全て表示)
+  visibleTableColumns: string[]; // 競合物件一覧の表示列ID (空 = 既定列)
+  dataMode: DataBasis; // 全体のデータ取得モード (actual=実績ベース / calendar=全物件カレンダー)
+  calendarCount: number; // カレンダー(future/rates)取得済みの物件数
   scatter: ScatterPoint[];
   trend: TrendPoint[];
   capacityBars: CapacityBar[];

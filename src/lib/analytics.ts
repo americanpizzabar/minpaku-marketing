@@ -111,12 +111,42 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
     s.minNightsCount.set(mn, (s.minNightsCount.get(mn) ?? 0) + 1);
   }
 
-  props = props.filter((p) => {
+  // 物件別の実効ADR/稼働率/最低泊数を求める。
+  // actualモード: 検索実績(過去90日→12ヶ月フォールバック)を優先し、無ければカレンダー。
+  // calendarモード: 従来どおりカレンダー(daily_metrics)のみ。
+  const mode = ds.dataMode;
+  const effOf = (
+    p: Property,
+  ): { adr: number; occ: number; minNights: number; basis: "calendar" | "actual" } | null => {
     const s = statsMap.get(p.id);
-    if (!s || s.total === 0 || s.prices.length === 0) return false;
-    const adr = avg(s.prices);
-    if (filters.priceMin !== null && adr < filters.priceMin) return false;
-    if (filters.priceMax !== null && adr > filters.priceMax) return false;
+    const hasCal = !!(s && s.total > 0 && s.prices.length > 0);
+    const calAdr = hasCal ? avg(s!.prices) : null;
+    const calOcc = s && s.total > 0 ? s.booked / s.total : null;
+    const calMn = s ? modeOf(s.minNightsCount) : 1;
+    const aAdr = p.l90dAvgRate ?? p.ttmAvgRate;
+    const aOcc = p.l90dOccupancy ?? p.ttmOccupancy; // 0-100
+    const hasAct = aAdr !== null && aAdr > 0 && aOcc !== null;
+    if (mode === "actual" && hasAct) {
+      return {
+        adr: aAdr!,
+        occ: aOcc! / 100,
+        minNights: Math.round(p.ttmAvgMinNights ?? calMn) || 1,
+        basis: "actual",
+      };
+    }
+    if (hasCal) {
+      return { adr: calAdr!, occ: calOcc ?? 0, minNights: calMn, basis: "calendar" };
+    }
+    return null;
+  };
+
+  const effMap = new Map<string, { adr: number; occ: number; minNights: number; basis: "calendar" | "actual" }>();
+  props = props.filter((p) => {
+    const e = effOf(p);
+    if (!e) return false;
+    if (filters.priceMin !== null && e.adr < filters.priceMin) return false;
+    if (filters.priceMax !== null && e.adr > filters.priceMax) return false;
+    effMap.set(p.id, e);
     return true;
   });
   const propIds = new Set(props.map((p) => p.id));
@@ -127,28 +157,45 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
   const mapPoints: MapPoint[] = [];
 
   for (const p of props) {
-    const s = statsMap.get(p.id)!;
-    const adr = avg(s.prices);
-    const occ = s.total > 0 ? s.booked / s.total : 0;
+    const e = effMap.get(p.id)!;
+    const adr = e.adr;
+    const occ = e.occ;
     rows.push({
       id: p.id,
       airroiId: p.airroiId,
+      airbnbId: p.airbnbId,
       title: p.title,
       area: p.area,
       propertyType: p.propertyType,
       bedrooms: p.bedrooms,
+      beds: p.beds,
+      bathrooms: p.bathrooms,
       maxGuests: p.maxGuests,
+      areaSqm: p.areaSqm,
       rating: p.rating,
       reviewsCount: p.reviewsCount,
       occupancyRate: Math.round(occ * 1000) / 10,
       adr: Math.round(adr),
       pricePerGuest: Math.round(adr / Math.max(p.maxGuests, 1)),
-      minNights: modeOf(s.minNightsCount),
-      areaSqm: p.areaSqm,
+      minNights: e.minNights,
+      dataBasis: e.basis,
       cleaningFee: p.cleaningFee,
+      extraGuestFee: p.extraGuestFee,
       superhost: p.superhost,
+      instantBook: p.instantBook,
+      professionalManagement: p.professionalManagement,
+      guestFavorite: p.guestFavorite,
+      hostName: p.hostName,
+      latitude: p.latitude,
+      longitude: p.longitude,
       l90dOccupancy: p.l90dOccupancy,
       l90dAvgRate: p.l90dAvgRate !== null ? Math.round(p.l90dAvgRate) : null,
+      l90dRevpar: p.l90dRevpar !== null ? Math.round(p.l90dRevpar) : null,
+      ttmOccupancy: p.ttmOccupancy,
+      ttmAvgRate: p.ttmAvgRate !== null ? Math.round(p.ttmAvgRate) : null,
+      ttmRevpar: p.ttmRevpar !== null ? Math.round(p.ttmRevpar) : null,
+      ttmAvgLos: p.ttmAvgLos,
+      ttmAvgMinNights: p.ttmAvgMinNights,
       url: p.url,
     });
     scatter.push({
@@ -433,6 +480,9 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
     kpisTop20,
     kpisLumina,
     visibleKpiCards: ds.visibleKpiCards,
+    visibleTableColumns: ds.visibleTableColumns,
+    dataMode: ds.dataMode,
+    calendarCount: ds.calendarCount,
     scatter,
     trend,
     capacityBars,

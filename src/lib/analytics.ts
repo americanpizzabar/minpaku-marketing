@@ -433,8 +433,9 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
   // ---- 定員数別 単価分布 ----
   const byBucket = new Map<string, { adrs: number[]; ppgs: number[] }>();
   for (const p of props) {
-    const s = statsMap.get(p.id)!;
-    const adr = avg(s.prices);
+    const e = effMap.get(p.id);
+    if (!e) continue; // 実効値のない物件は集計対象外 (念のため)
+    const adr = e.adr;
     const bucket = capacityBucketOf(p.maxGuests);
     let b = byBucket.get(bucket);
     if (!b) {

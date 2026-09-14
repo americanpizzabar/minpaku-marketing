@@ -47,6 +47,12 @@ export interface SyncConfig {
   luminaOccupancy: number | null; // 自物件の稼働率 (%表記, API未収録時に使用, null=未設定)
   luminaLat: number | null; // 自物件の緯度 (地図マーカー位置, null=未設定)
   luminaLng: number | null; // 自物件の経度
+  // 競合分析(勝ちパターン比較)用の自物件スペック (null/空=未設定)
+  luminaRating: number | null; // 評価 (★)
+  luminaReviews: number | null; // レビュー数
+  luminaPhotos: number | null; // 写真枚数
+  luminaSuperhost: boolean | null; // スーパーホストか
+  luminaAmenities: string[]; // 保有設備 (カンマ区切りで保存)
   kpiCards: string[]; // マーケット概況の表示カードID (空 = 全て表示)
   tableColumns: string[]; // 競合物件一覧の表示列ID (空 = 既定列)
   // actual=実績ベース(検索実績中心・低コスト) / calendar=全物件カレンダー(現行・高コスト)
@@ -87,6 +93,33 @@ export async function getSyncConfig(db: Client): Promise<SyncConfig> {
       const n = Number(map.get("config:lumina_lng"));
       return Number.isFinite(n) && n !== 0 ? n : null;
     })(),
+    luminaRating: (() => {
+      const v = map.get("config:lumina_rating");
+      if (v === undefined || v === "") return null;
+      const n = Number(v);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    })(),
+    luminaReviews: (() => {
+      const v = map.get("config:lumina_reviews");
+      if (v === undefined || v === "") return null;
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 0 ? n : null;
+    })(),
+    luminaPhotos: (() => {
+      const v = map.get("config:lumina_photos");
+      if (v === undefined || v === "") return null;
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 0 ? n : null;
+    })(),
+    luminaSuperhost: (() => {
+      const v = map.get("config:lumina_superhost");
+      if (v === undefined || v === "") return null;
+      return v === "1";
+    })(),
+    luminaAmenities: (map.get("config:lumina_amenities") ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
     kpiCards: (map.get("config:kpi_cards") ?? "").split(",").filter(Boolean),
     tableColumns: (map.get("config:table_columns") ?? "").split(",").filter(Boolean),
     dataMode: map.get("config:data_mode") === "calendar" ? "calendar" : "actual",
@@ -120,6 +153,16 @@ export async function saveSyncConfig(db: Client, config: Partial<SyncConfig>): P
     entries.push(["config:lumina_lat", config.luminaLat === null ? "" : String(config.luminaLat)]);
   if (config.luminaLng !== undefined)
     entries.push(["config:lumina_lng", config.luminaLng === null ? "" : String(config.luminaLng)]);
+  if (config.luminaRating !== undefined)
+    entries.push(["config:lumina_rating", config.luminaRating === null ? "" : String(config.luminaRating)]);
+  if (config.luminaReviews !== undefined)
+    entries.push(["config:lumina_reviews", config.luminaReviews === null ? "" : String(config.luminaReviews)]);
+  if (config.luminaPhotos !== undefined)
+    entries.push(["config:lumina_photos", config.luminaPhotos === null ? "" : String(config.luminaPhotos)]);
+  if (config.luminaSuperhost !== undefined)
+    entries.push(["config:lumina_superhost", config.luminaSuperhost === null ? "" : config.luminaSuperhost ? "1" : "0"]);
+  if (config.luminaAmenities !== undefined)
+    entries.push(["config:lumina_amenities", config.luminaAmenities.join(",")]);
   if (config.kpiCards !== undefined)
     entries.push(["config:kpi_cards", config.kpiCards.join(",")]);
   if (config.tableColumns !== undefined)

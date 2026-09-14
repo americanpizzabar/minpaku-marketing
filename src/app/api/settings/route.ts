@@ -143,6 +143,38 @@ export async function POST(request: NextRequest) {
         : undefined,
     luminaLat: floatField(body.luminaLat, 20, 46),
     luminaLng: floatField(body.luminaLng, 122, 154),
+    luminaRating:
+      "luminaRating" in body
+        ? body.luminaRating === null || body.luminaRating === ""
+          ? null
+          : Math.max(0, Math.min(5, Number(body.luminaRating) || 0)) || null
+        : undefined,
+    luminaReviews:
+      "luminaReviews" in body
+        ? body.luminaReviews === null || body.luminaReviews === ""
+          ? null
+          : numField(body.luminaReviews, 0, 100000) ?? null
+        : undefined,
+    luminaPhotos:
+      "luminaPhotos" in body
+        ? body.luminaPhotos === null || body.luminaPhotos === ""
+          ? null
+          : numField(body.luminaPhotos, 0, 500) ?? null
+        : undefined,
+    luminaSuperhost:
+      "luminaSuperhost" in body
+        ? typeof body.luminaSuperhost === "boolean"
+          ? body.luminaSuperhost
+          : null
+        : undefined,
+    luminaAmenities:
+      "luminaAmenities" in body
+        ? typeof body.luminaAmenities === "string"
+          ? body.luminaAmenities.split(",").map((s) => s.trim()).filter(Boolean)
+          : Array.isArray(body.luminaAmenities)
+            ? (body.luminaAmenities as unknown[]).map(String).map((s) => s.trim()).filter(Boolean)
+            : undefined
+        : undefined,
     kpiCards: Array.isArray(body.kpiCards)
       ? (body.kpiCards as unknown[])
           .map(String)

@@ -16,6 +16,11 @@ interface SettingsState {
   luminaOccupancy: number | ""; // "" = 未設定
   luminaLat: string; // 文字列で保持 ("" = 未設定)
   luminaLng: string;
+  luminaRating: string; // 分析用スペック ("" = 未設定)
+  luminaReviews: string;
+  luminaPhotos: string;
+  luminaSuperhost: "" | "yes" | "no";
+  luminaAmenities: string; // カンマ区切り
   kpiCards: string[]; // 表示するKPIカードID (空 = 全て表示)
   dataMode: "actual" | "calendar";
   ratesSubsetSize: number;
@@ -37,6 +42,14 @@ function toFormState(config: Record<string, unknown>): SettingsState {
         : Number(config.luminaOccupancy),
     luminaLat: config.luminaLat == null ? "" : String(config.luminaLat),
     luminaLng: config.luminaLng == null ? "" : String(config.luminaLng),
+    luminaRating: config.luminaRating == null ? "" : String(config.luminaRating),
+    luminaReviews: config.luminaReviews == null ? "" : String(config.luminaReviews),
+    luminaPhotos: config.luminaPhotos == null ? "" : String(config.luminaPhotos),
+    luminaSuperhost:
+      config.luminaSuperhost == null ? "" : config.luminaSuperhost ? "yes" : "no",
+    luminaAmenities: Array.isArray(config.luminaAmenities)
+      ? (config.luminaAmenities as string[]).join(", ")
+      : "",
     kpiCards: Array.isArray(config.kpiCards) ? (config.kpiCards as string[]) : [],
     dataMode: config.dataMode === "calendar" ? "calendar" : "actual",
     ratesSubsetSize: Number(config.ratesSubsetSize ?? 40),
@@ -115,6 +128,12 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
           luminaOccupancy: form.luminaOccupancy === "" ? null : form.luminaOccupancy,
           luminaLat: form.luminaLat.trim() === "" ? null : Number(form.luminaLat),
           luminaLng: form.luminaLng.trim() === "" ? null : Number(form.luminaLng),
+          luminaRating: form.luminaRating.trim() === "" ? null : Number(form.luminaRating),
+          luminaReviews: form.luminaReviews.trim() === "" ? null : Number(form.luminaReviews),
+          luminaPhotos: form.luminaPhotos.trim() === "" ? null : Number(form.luminaPhotos),
+          luminaSuperhost:
+            form.luminaSuperhost === "" ? null : form.luminaSuperhost === "yes",
+          luminaAmenities: form.luminaAmenities,
         }),
       });
       const json = await res.json();
@@ -343,6 +362,83 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                       }
                       placeholder="例: 65 (空欄=未設定)"
                     />
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-lg bg-slate-50 p-2.5">
+                <p className="mb-2 text-[11px] font-semibold text-slate-500">
+                  自物件スペック (勝ちパターン分析の比較用)
+                </p>
+                <div className="flex flex-col gap-2.5">
+                  <div className="flex gap-2">
+                    <div className="flex-1">
+                      <label className={labelClass}>評価 (★)</label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={5}
+                        step={0.01}
+                        className={inputClass}
+                        value={form.luminaRating}
+                        onChange={(e) => setForm({ ...form, luminaRating: e.target.value })}
+                        placeholder="例: 4.85"
+                      />
+                    </div>
+                    <div className="flex-1">
+                      <label className={labelClass}>レビュー数</label>
+                      <input
+                        type="number"
+                        min={0}
+                        className={inputClass}
+                        value={form.luminaReviews}
+                        onChange={(e) => setForm({ ...form, luminaReviews: e.target.value })}
+                        placeholder="例: 42"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <div className="flex-1">
+                      <label className={labelClass}>写真枚数</label>
+                      <input
+                        type="number"
+                        min={0}
+                        className={inputClass}
+                        value={form.luminaPhotos}
+                        onChange={(e) => setForm({ ...form, luminaPhotos: e.target.value })}
+                        placeholder="例: 35"
+                      />
+                    </div>
+                    <div className="flex-1">
+                      <label className={labelClass}>スーパーホスト</label>
+                      <select
+                        className={inputClass}
+                        value={form.luminaSuperhost}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            luminaSuperhost: e.target.value as "" | "yes" | "no",
+                          })
+                        }
+                      >
+                        <option value="">未設定</option>
+                        <option value="yes">はい</option>
+                        <option value="no">いいえ</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div>
+                    <label className={labelClass}>保有設備 (カンマ区切り)</label>
+                    <input
+                      type="text"
+                      className={inputClass}
+                      value={form.luminaAmenities}
+                      onChange={(e) => setForm({ ...form, luminaAmenities: e.target.value })}
+                      placeholder="例: Hot tub, Sauna, BBQ grill, Wifi, Free parking"
+                    />
+                    <p className="mt-1 text-[11px] text-slate-400">
+                      AirROIの設備名(英語)に合わせると勝ち組との保有比較が正確になります
+                    </p>
                   </div>
                 </div>
               </div>

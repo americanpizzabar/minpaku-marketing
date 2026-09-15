@@ -161,6 +161,55 @@ export async function GET(request: NextRequest) {
     }
   }
 
+  // detail=1: 単一リスティング詳細 (GET /listings?id=) のレスポンス構造とスペック抽出を検証するモード
+  if (request.nextUrl.searchParams.get("detail") === "1") {
+    try {
+      const res = await fetch(`${base}/listings?id=${encodeURIComponent(id)}&currency=native`, {
+        headers: { "x-api-key": apiKey, Accept: "application/json" },
+      });
+      const text = await res.text().catch(() => "");
+      if (!res.ok) {
+        return NextResponse.json({ mode: "detail", status: res.status, body: text.slice(0, 800) });
+      }
+      const json = parseJsonSafe<Record<string, unknown>>(text);
+      // 本体の取り出し (results / listings / data / listing / 本体そのもの)
+      const arr = (json.results ?? json.listings ?? json.data) as unknown;
+      let obj: Record<string, unknown> = json;
+      if (Array.isArray(arr)) obj = (arr[0] as Record<string, unknown>) ?? {};
+      else if (json.listing && typeof json.listing === "object")
+        obj = json.listing as Record<string, unknown>;
+      else if (json.data && typeof json.data === "object" && !Array.isArray(json.data))
+        obj = json.data as Record<string, unknown>;
+      const flat: Record<string, unknown> = { ...obj };
+      for (const v of Object.values(obj)) {
+        if (typeof v === "object" && v !== null && !Array.isArray(v)) Object.assign(flat, v);
+      }
+      const specFields = Object.fromEntries(
+        Object.entries(flat).filter(([k]) =>
+          /rating|review|photo|superhost|amenit|bedroom|bath|bed|capacity|accommodat|guest|occup|rate|revpar/i.test(
+            k,
+          ),
+        ),
+      );
+      return NextResponse.json({
+        mode: "detail",
+        status: res.status,
+        topLevelKeys: Object.keys(json),
+        objKeys: Object.keys(obj),
+        flatKeys: Object.keys(flat),
+        specFields,
+        amenitiesSample: Array.isArray(flat.amenities)
+          ? (flat.amenities as unknown[]).slice(0, 12)
+          : flat.amenities,
+      });
+    } catch (err) {
+      return NextResponse.json({
+        mode: "detail",
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   const variants = [`/listings/future/rates?id=${id}&currency=native`];
 
   const results: Record<string, unknown>[] = [];

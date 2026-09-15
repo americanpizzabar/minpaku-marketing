@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   getSyncConfig,
   refreshLuminaRates,
+  refreshLuminaSpecs,
   saveSyncConfig,
   COST_PER_RATES_CALL,
   COST_PER_SEARCH_CALL,
@@ -105,6 +106,35 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "不正なリクエストです" }, { status: 400 });
   }
 
+  // 「自物件スペックを自動取得」: AirROI の単一リスティング詳細から取得して config に保存する
+  if (body.action === "fetchLuminaSpecs") {
+    const cfg = await getSyncConfig(db);
+    if (!cfg.luminaListingId) {
+      return NextResponse.json(
+        { error: "先に自物件のAirbnbリスティングIDを保存してください。" },
+        { status: 400 },
+      );
+    }
+    const result = await refreshLuminaSpecs(db, cfg);
+    const newConfig = await getSyncConfig(db);
+    const countRes = await db.execute(
+      "SELECT COUNT(*) AS c FROM properties WHERE id LIKE 'airroi_%'",
+    );
+    const trackedProperties = Number(countRes.rows[0]?.c ?? 0);
+    return NextResponse.json(
+      {
+        saved: result.ok,
+        message: result.message,
+        error: result.ok ? undefined : result.message,
+        fetched: result.fetched,
+        config: newConfig,
+        trackedProperties,
+        estimatedMonthlyCostUsd: estimateMonthlyCost(trackedProperties, newConfig),
+      },
+      { status: result.ok ? 200 : 502 },
+    );
+  }
+
   const numField = (v: unknown, min: number, max: number): number | undefined => {
     if (v === undefined || v === null || v === "") return undefined;
     const n = Number(v);
@@ -188,7 +218,7 @@ export async function POST(request: NextRequest) {
     ratesSubsetSize: numField(body.ratesSubsetSize, 0, 1000),
   });
 
-  const config = await getSyncConfig(db);
+  let config = await getSyncConfig(db);
 
   // リスティングID・基準価格が変わった場合はその場でベンチマークを再生成し、
   // 保存直後のページ再読み込みでグラフに即時反映されるようにする
@@ -200,6 +230,17 @@ export async function POST(request: NextRequest) {
       await refreshLuminaRates(db, config);
     } catch (err) {
       console.error("設定保存後のLuminaベンチマーク再生成に失敗:", err);
+    }
+  }
+
+  // リスティングIDが新規登録・変更された場合は自物件スペックも自動取得する
+  // (手動入力を尊重するため refreshLuminaSpecs 側で未設定項目のみ補完)
+  if (config.luminaListingId && config.luminaListingId !== prevConfig.luminaListingId) {
+    try {
+      await refreshLuminaSpecs(db, config);
+      config = await getSyncConfig(db);
+    } catch (err) {
+      console.error("設定保存後の自物件スペック取得に失敗:", err);
     }
   }
   const countRes = await db.execute(

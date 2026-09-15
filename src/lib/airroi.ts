@@ -583,6 +583,129 @@ export async function refreshLuminaRates(
   return { records: stmts.length - 2, usedApi };
 }
 
+/** GET /listings?id=<id> で取得できる自物件スペック (抽出後) */
+export interface LuminaSpecFetch {
+  rating: number | null;
+  reviews: number | null;
+  photos: number | null;
+  superhost: boolean | null;
+  amenities: string[];
+  bedrooms: number | null;
+  maxGuests: number | null;
+  beds: number | null;
+  bathrooms: number | null;
+  occupancy: number | null; // 0-100
+  adr: number | null;
+  title: string | null;
+}
+
+/**
+ * 自物件 (Lumina) を AirROI の単一リスティング詳細エンドポイント
+ * `GET /listings?id=<listing_id>` から取得してスペックを抽出する。
+ * カタログ検索 (search/radius) と同じ形のリッチデータが返るため、
+ * カタログ取り込みと同じ pick/flatten 抽出ロジックを再利用する。
+ * リスティングIDが未設定・該当なしの場合は null を返す。
+ */
+export async function fetchLuminaSpecs(config: SyncConfig): Promise<LuminaSpecFetch | null> {
+  const id = config.luminaListingId?.replace(/\D/g, "");
+  if (!id) return null;
+  const res = await airRoiGet<Json>(`/listings?id=${encodeURIComponent(id)}&currency=native`);
+
+  // レスポンスの包み方 (results 配列 / listing / data / 本体そのもの) を吸収する
+  let obj: Json | undefined;
+  const arr = (res.results ?? res.listings ?? res.data) as unknown;
+  if (Array.isArray(arr)) obj = arr[0] as Json | undefined;
+  else if (res.listing && typeof res.listing === "object") obj = res.listing as Json;
+  else if (res.data && typeof res.data === "object") obj = res.data as Json;
+  else obj = res;
+  if (!obj || typeof obj !== "object") return null;
+
+  const flat = flatten(obj);
+  const occPct = (v: unknown): number | null => {
+    const n = num(v);
+    if (n === null) return null;
+    return Math.round((n <= 1 ? n * 100 : n) * 10) / 10;
+  };
+  const amenRaw = Array.isArray(flat.amenities) ? (flat.amenities as unknown[]) : [];
+  const amenities = [...new Set(amenRaw.map((a) => String(a).trim()).filter(Boolean))];
+  const titleRaw = pick(flat, ["listing_name", "title", "name"]);
+
+  return {
+    rating: num(pick(flat, ["rating_overall", "rating", "overall_rating", "review_score"])),
+    reviews: num(pick(flat, ["num_reviews", "reviews_count", "number_of_reviews", "review_count"])),
+    photos: num(pick(flat, ["photos_count", "num_photos", "photo_count", "number_of_photos"])),
+    superhost:
+      flat.superhost === undefined || flat.superhost === null ? null : Boolean(flat.superhost),
+    amenities,
+    bedrooms: num(pick(flat, ["bedrooms", "bedroom_count"])),
+    maxGuests: num(
+      pick(flat, ["person_capacity", "accommodates", "max_guests", "guests", "capacity"]),
+    ),
+    beds: num(flat.beds),
+    bathrooms: num(pick(flat, ["baths", "bathrooms", "bathroom_count"])),
+    occupancy: occPct(pick(flat, ["l90d_occupancy", "ttm_occupancy"])),
+    adr: num(pick(flat, ["l90d_avg_rate", "ttm_avg_rate"])),
+    title: titleRaw != null ? String(titleRaw) : null,
+  };
+}
+
+/**
+ * 自物件スペックを AirROI から取得し config に保存する (勝ちパターン分析・収益ラボ用)。
+ * 分析用スペック (評価/レビュー/写真/スーパーホスト/設備) は取得値で上書きし、
+ * 物理スペック・稼働率 (寝室/定員/稼働率) は未設定のときだけ補完 (手動入力を尊重)。
+ */
+export async function refreshLuminaSpecs(
+  db: Client,
+  config: SyncConfig,
+): Promise<{ ok: boolean; fetched: LuminaSpecFetch | null; message: string }> {
+  let specs: LuminaSpecFetch | null;
+  try {
+    specs = await fetchLuminaSpecs(config);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("AirROI: 自物件スペック取得に失敗:", message);
+    return { ok: false, fetched: null, message: `取得に失敗しました: ${message.slice(0, 200)}` };
+  }
+  if (!specs) {
+    return {
+      ok: false,
+      fetched: null,
+      message: "リスティングIDが未設定か、AirROIに該当リスティングが見つかりませんでした。",
+    };
+  }
+
+  const patch: Partial<SyncConfig> = {};
+  if (specs.rating !== null) patch.luminaRating = specs.rating;
+  if (specs.reviews !== null) patch.luminaReviews = specs.reviews;
+  if (specs.photos !== null) patch.luminaPhotos = specs.photos;
+  if (specs.superhost !== null) patch.luminaSuperhost = specs.superhost;
+  if (specs.amenities.length > 0) patch.luminaAmenities = specs.amenities;
+  // 物理スペック・稼働率は手動入力を優先し、未設定 (0/null) のときのみ補完
+  if (specs.bedrooms !== null && !config.luminaBedrooms) patch.luminaBedrooms = specs.bedrooms;
+  if (specs.maxGuests !== null && !config.luminaMaxGuests) patch.luminaMaxGuests = specs.maxGuests;
+  if (
+    specs.occupancy !== null &&
+    (config.luminaOccupancy === null || config.luminaOccupancy === undefined)
+  ) {
+    patch.luminaOccupancy = specs.occupancy;
+  }
+
+  await saveSyncConfig(db, patch);
+
+  const filled: string[] = [];
+  if (patch.luminaRating !== undefined) filled.push(`評価 ${specs.rating}★`);
+  if (patch.luminaReviews !== undefined) filled.push(`レビュー ${specs.reviews}件`);
+  if (patch.luminaPhotos !== undefined) filled.push(`写真 ${specs.photos}枚`);
+  if (patch.luminaSuperhost !== undefined)
+    filled.push(`スーパーホスト ${specs.superhost ? "○" : "×"}`);
+  if (patch.luminaAmenities !== undefined) filled.push(`設備 ${specs.amenities.length}件`);
+  const message =
+    filled.length > 0
+      ? `自物件スペックを自動取得しました → ${filled.join(" / ")}`
+      : "リスティング詳細は取得できましたが、スペック項目を抽出できませんでした。";
+  return { ok: true, fetched: specs, message };
+}
+
 /**
  * 増分同期を1ステップ実行する。
  * - カタログが searchRefreshDays より古いエリアを再検索

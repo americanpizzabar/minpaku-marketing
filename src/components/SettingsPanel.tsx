@@ -66,6 +66,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
   const [open, setOpen] = useState(defaultOpen);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [fetchingSpecs, setFetchingSpecs] = useState(false);
   const [catalogRefreshing, setCatalogRefreshing] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [configured, setConfigured] = useState(true);
@@ -112,6 +113,32 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
       setMessage("更新リクエストに失敗しました");
     } finally {
       setCatalogRefreshing(false);
+    }
+  };
+
+  // 自物件スペック (評価・レビュー・写真・スーパーホスト・設備) をAirROIから自動取得する
+  const fetchLuminaSpecs = async () => {
+    if (!form) return;
+    if (!form.luminaListingId.trim()) {
+      setMessage("先に自物件のリスティングIDを入力し、保存してください");
+      return;
+    }
+    setFetchingSpecs(true);
+    setMessage(null);
+    try {
+      const res = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "fetchLuminaSpecs" }),
+      });
+      const json = await res.json();
+      if (json.config) setForm(toFormState(json.config));
+      setMessage(json.message ?? json.error ?? (json.saved ? "取得しました" : "取得に失敗しました"));
+      if (json.saved) router.refresh();
+    } catch {
+      setMessage("スペック取得リクエストに失敗しました");
+    } finally {
+      setFetchingSpecs(false);
     }
   };
 
@@ -367,8 +394,20 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
               </div>
 
               <div className="rounded-lg bg-slate-50 p-2.5">
-                <p className="mb-2 text-[11px] font-semibold text-slate-500">
-                  自物件スペック (勝ちパターン分析の比較用)
+                <p className="mb-1 text-[11px] font-semibold text-slate-500">
+                  自物件スペック (勝ちパターン分析・収益ラボの比較用)
+                </p>
+                <button
+                  onClick={fetchLuminaSpecs}
+                  disabled={fetchingSpecs || !form.luminaListingId.trim()}
+                  className="mb-2 w-full rounded-lg border border-indigo-300 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100 disabled:opacity-50"
+                >
+                  {fetchingSpecs
+                    ? "取得中..."
+                    : "⬇ AirbnbリスティングIDから自動取得 (約$0.1)"}
+                </button>
+                <p className="mb-2 text-[11px] text-slate-400">
+                  登録済みのリスティングIDを使い、評価・レビュー数・写真枚数・スーパーホスト・保有設備をAirROIから取得して下記に反映します。手入力で上書きも可能です。
                 </p>
                 <div className="flex flex-col gap-2.5">
                   <div className="flex gap-2">

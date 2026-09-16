@@ -126,12 +126,14 @@ export async function POST(request: NextRequest) {
         saved: result.ok,
         message: result.message,
         error: result.ok ? undefined : result.message,
+        notFound: result.notFound ?? false,
         fetched: result.fetched,
         config: newConfig,
         trackedProperties,
         estimatedMonthlyCostUsd: estimateMonthlyCost(trackedProperties, newConfig),
       },
-      { status: result.ok ? 200 : 502 },
+      // 未収録(404)はサーバー障害ではなくデータ不在なので 200 で返し、UIで案内する
+      { status: result.ok || result.notFound ? 200 : 502 },
     );
   }
 

@@ -657,13 +657,23 @@ export async function fetchLuminaSpecs(config: SyncConfig): Promise<LuminaSpecFe
 export async function refreshLuminaSpecs(
   db: Client,
   config: SyncConfig,
-): Promise<{ ok: boolean; fetched: LuminaSpecFetch | null; message: string }> {
+): Promise<{ ok: boolean; fetched: LuminaSpecFetch | null; message: string; notFound?: boolean }> {
   let specs: LuminaSpecFetch | null;
   try {
     specs = await fetchLuminaSpecs(config);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("AirROI: 自物件スペック取得に失敗:", message);
+    // AirROIにこの物件が未収録 (404 / not found / not been added) の場合は
+    // 手入力での登録を促す、原因が分かるメッセージを返す
+    if (/\b404\b|not found|not been added|listing not found/i.test(message)) {
+      return {
+        ok: false,
+        fetched: null,
+        notFound: true,
+        message: `この物件 (ID: ${config.luminaListingId}) はAirROIにまだ収録されていないため自動取得できません。IDが正しいかご確認のうえ、当面は下記の各項目を手入力で登録してください (AirROIが収録すれば自動取得も使えます)。`,
+      };
+    }
     return { ok: false, fetched: null, message: `取得に失敗しました: ${message.slice(0, 200)}` };
   }
   if (!specs) {

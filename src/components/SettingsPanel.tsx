@@ -69,6 +69,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
   const [fetchingSpecs, setFetchingSpecs] = useState(false);
   const [catalogRefreshing, setCatalogRefreshing] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [messageTone, setMessageTone] = useState<"info" | "error">("info");
   const [configured, setConfigured] = useState(true);
   const [tracked, setTracked] = useState<number | null>(null);
   const [monthlyCost, setMonthlyCost] = useState<number | null>(null);
@@ -98,6 +99,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
     }
     setCatalogRefreshing(true);
     setMessage(null);
+    setMessageTone("info");
     try {
       const res = await fetch("/api/sync?catalog=1", { method: "POST" });
       const json = await res.json();
@@ -125,6 +127,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
     }
     setFetchingSpecs(true);
     setMessage(null);
+    setMessageTone("info");
     try {
       const res = await fetch("/api/settings", {
         method: "POST",
@@ -133,9 +136,11 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
       });
       const json = await res.json();
       if (json.config) setForm(toFormState(json.config));
+      setMessageTone(json.saved ? "info" : "error");
       setMessage(json.message ?? json.error ?? (json.saved ? "取得しました" : "取得に失敗しました"));
       if (json.saved) router.refresh();
     } catch {
+      setMessageTone("error");
       setMessage("スペック取得リクエストに失敗しました");
     } finally {
       setFetchingSpecs(false);
@@ -146,6 +151,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
     if (!form) return;
     setSaving(true);
     setMessage(null);
+    setMessageTone("info");
     try {
       const res = await fetch("/api/settings", {
         method: "POST",
@@ -549,7 +555,17 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
               </p>
             </>
           )}
-          {message && <p className="text-xs text-slate-500">{message}</p>}
+          {message && (
+            <p
+              className={`rounded-lg px-2.5 py-2 text-xs ${
+                messageTone === "error"
+                  ? "border border-amber-300 bg-amber-50 text-amber-800"
+                  : "text-slate-500"
+              }`}
+            >
+              {message}
+            </p>
+          )}
         </div>
       )}
     </div>

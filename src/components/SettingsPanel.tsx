@@ -414,6 +414,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                 </button>
                 <p className="mb-2 text-[11px] text-slate-400">
                   登録済みのリスティングIDを使い、評価・レビュー数・写真枚数・スーパーホスト・保有設備をAirROIから取得して下記に反映します。手入力で上書きも可能です。
+                  自物件がAirROI未収録の場合は取得できませんが、その際もデータ同期のたびに自動で再取得を試み、収録され次第この欄に反映されます。
                 </p>
                 <div className="flex flex-col gap-2.5">
                   <div className="flex gap-2">

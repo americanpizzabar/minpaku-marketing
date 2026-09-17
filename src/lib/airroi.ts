@@ -838,6 +838,36 @@ export async function syncStep(
           console.error("AirROI sync: Lumina Fuji の料金更新に失敗:", err);
         }
       }
+
+      // 2.5 自物件スペックが未取得の間だけ、AirROI収録を待って自動リトライする。
+      //     未収録(404)の間の無駄打ちを抑えるため、3日に1回だけ試行する。
+      const specsUnset =
+        config.luminaRating === null &&
+        config.luminaReviews === null &&
+        config.luminaPhotos === null &&
+        config.luminaSuperhost === null &&
+        config.luminaAmenities.length === 0;
+      if (specsUnset) {
+        const checkedRes = await db.execute(
+          "SELECT value FROM sync_state WHERE key = 'lumina_specs_checked_at' AND value >= datetime('now', '-3 days')",
+        );
+        if (checkedRes.rows.length === 0) {
+          try {
+            const specResult = await refreshLuminaSpecs(db, config);
+            ratesCalls += 1; // /listings 呼び出しのコスト計上
+            console.log(
+              `AirROI sync: 自物件スペック自動取得 — ${specResult.ok ? "成功" : specResult.notFound ? "AirROI未収録(待機)" : "失敗"}`,
+            );
+          } catch (err) {
+            console.error("AirROI sync: 自物件スペック自動取得に失敗:", err);
+          }
+          await db.execute({
+            sql: `INSERT INTO sync_state (key, value) VALUES ('lumina_specs_checked_at', datetime('now'))
+                  ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+            args: [],
+          });
+        }
+      }
     }
 
     // 3. 料金カレンダーが古い物件を古い順に更新。

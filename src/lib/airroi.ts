@@ -281,13 +281,22 @@ interface FutureRatesResponse {
   rates?: { date?: string; available?: unknown; rate?: unknown; min_nights?: unknown }[];
 }
 
-/** エリアの物件カタログを再取得して properties をUPSERTする (料金は取得しない) */
+/** エリアの物件カタログを再取得して properties をUPSERTする (料金は取得しない)。
+ *  seenIds を渡すと、エリア間で重複する物件を跨いで検知し、
+ *  そのページが既知IDのみ (= 他エリアと完全重複) になった時点でページ送りを打ち切る
+ *  (山中湖・忍野・富士吉田など半径が重なる円で同じ物件に二重課金するのを防ぐ)。 */
 async function refreshAreaCatalog(
   db: Client,
   area: string,
+  seenIds?: Set<string>,
 ): Promise<{ searchCalls: number; listings: number }> {
   const center = AREA_SEARCH[area];
   if (!center) return { searchCalls: 0, listings: 0 };
+
+  const idOf = (raw: Json): string | undefined => {
+    const v = pick(flatten(raw), ["listing_id", "id", "listingId"]);
+    return v === undefined ? undefined : String(v);
+  };
 
   let searchCalls = 0;
   const collected: Json[] = [];
@@ -306,6 +315,17 @@ async function refreshAreaCatalog(
     if (page.length === 0) break;
     collected.push(...page);
     offset += PAGE_SIZE;
+    // エリア間重複の打ち切り: このページが既知IDのみなら以降は重複とみなし停止
+    if (seenIds) {
+      let newInPage = 0;
+      for (const raw of page) {
+        const id = idOf(raw);
+        if (id === undefined) continue;
+        if (!seenIds.has(id)) newInPage += 1;
+        seenIds.add(id);
+      }
+      if (newInPage === 0) break;
+    }
   }
 
   const stmts: InStatement[] = [];
@@ -755,6 +775,7 @@ export async function syncStep(
   syncType: "cron_daily" | "manual_refresh",
   capRemaining: number | null,
   config: SyncConfig,
+  opts: { skipCatalog?: boolean } = {},
 ): Promise<SyncStepResult> {
   const startedAt = Date.now();
   const catalogRefreshed: string[] = [];
@@ -806,20 +827,26 @@ export async function syncStep(
 
   try {
     // 1. カタログ更新が必要なエリア (sync_state の catalog:<area> が古い/未登録)
-    const freshRes = await db.execute({
-      sql: `SELECT key FROM sync_state WHERE key LIKE 'catalog:%' AND value >= datetime('now', ?)`,
-      args: [`-${config.searchRefreshDays} days`],
-    });
-    const fresh = new Set(freshRes.rows.map((r) => String(r.key).slice("catalog:".length)));
-    let staleAreas = ALL_AREAS.filter((a) => !fresh.has(a));
+    //    skipCatalog=true (通常の手動更新) のときはカタログ検索($0.50/回)を一切行わない。
+    let staleAreas: string[] = [];
+    if (!opts.skipCatalog) {
+      const freshRes = await db.execute({
+        sql: `SELECT key FROM sync_state WHERE key LIKE 'catalog:%' AND value >= datetime('now', ?)`,
+        args: [`-${config.searchRefreshDays} days`],
+      });
+      const fresh = new Set(freshRes.rows.map((r) => String(r.key).slice("catalog:".length)));
+      staleAreas = ALL_AREAS.filter((a) => !fresh.has(a));
 
-    for (const area of [...staleAreas]) {
-      if (Date.now() - startedAt > HARD_BUDGET_MS) break;
-      const r = await refreshAreaCatalog(db, area);
-      searchCalls += r.searchCalls;
-      catalogRefreshed.push(area);
-      staleAreas = staleAreas.filter((a) => a !== area);
-      console.log(`AirROI sync: カタログ更新 ${area} (${r.listings}物件, 検索${r.searchCalls}回)`);
+      // エリア間で重複する物件を跨いで検知し、重複ページを打ち切って検索回数を削減する
+      const seenIds = new Set<string>();
+      for (const area of [...staleAreas]) {
+        if (Date.now() - startedAt > HARD_BUDGET_MS) break;
+        const r = await refreshAreaCatalog(db, area, seenIds);
+        searchCalls += r.searchCalls;
+        catalogRefreshed.push(area);
+        staleAreas = staleAreas.filter((a) => a !== area);
+        console.log(`AirROI sync: カタログ更新 ${area} (${r.listings}物件, 検索${r.searchCalls}回)`);
+      }
     }
 
     // 2. 自物件 (Lumina Fuji) のベンチマーク用料金 — 競合と同じ周期で更新

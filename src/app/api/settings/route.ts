@@ -80,11 +80,13 @@ export async function GET(request: NextRequest) {
     "SELECT COUNT(*) AS c FROM properties WHERE id LIKE 'airroi_%'",
   );
   const trackedProperties = Number(countRes.rows[0]?.c ?? 0);
+  const costEstimate = estimateCosts(trackedProperties, config);
   return NextResponse.json({
     configured: true,
     config,
     trackedProperties,
-    estimatedMonthlyCostUsd: estimateMonthlyCost(trackedProperties, config),
+    costEstimate,
+    estimatedMonthlyCostUsd: costEstimate.autoSync ? costEstimate.monthlyIfAutoUsd : 0,
   });
 }
 
@@ -121,6 +123,7 @@ export async function POST(request: NextRequest) {
       "SELECT COUNT(*) AS c FROM properties WHERE id LIKE 'airroi_%'",
     );
     const trackedProperties = Number(countRes.rows[0]?.c ?? 0);
+    const costEstimate = estimateCosts(trackedProperties, newConfig);
     return NextResponse.json(
       {
         saved: result.ok,
@@ -130,7 +133,8 @@ export async function POST(request: NextRequest) {
         fetched: result.fetched,
         config: newConfig,
         trackedProperties,
-        estimatedMonthlyCostUsd: estimateMonthlyCost(trackedProperties, newConfig),
+        costEstimate,
+        estimatedMonthlyCostUsd: costEstimate.autoSync ? costEstimate.monthlyIfAutoUsd : 0,
       },
       // 未収録(404)はサーバー障害ではなくデータ不在なので 200 で返し、UIで案内する
       { status: result.ok || result.notFound ? 200 : 502 },
@@ -249,37 +253,56 @@ export async function POST(request: NextRequest) {
     "SELECT COUNT(*) AS c FROM properties WHERE id LIKE 'airroi_%'",
   );
   const trackedProperties = Number(countRes.rows[0]?.c ?? 0);
+  const costEstimate = estimateCosts(trackedProperties, config);
   return NextResponse.json({
     saved: true,
     config,
     trackedProperties,
-    estimatedMonthlyCostUsd: estimateMonthlyCost(trackedProperties, config),
+    costEstimate,
+    estimatedMonthlyCostUsd: costEstimate.autoSync ? costEstimate.monthlyIfAutoUsd : 0,
   });
 }
 
-function estimateMonthlyCost(
+interface CostEstimate {
+  autoSync: boolean;
+  /** カタログ全更新1回のコスト (検索$0.50 × 全エリアの最大ページ数) */
+  catalogRefreshUsd: number;
+  /** 料金カレンダー更新1回(手動)のコスト (dailyRatesCalls件 + 自物件) */
+  ratesSyncUsd: number;
+  /** 自動同期ON時の推定月額 (カタログ + 料金) */
+  monthlyIfAutoUsd: number;
+}
+
+function estimateCosts(
   trackedProperties: number,
   config: {
     autoSync: boolean;
     ratesRefreshDays: number;
     searchRefreshDays: number;
+    dailyRatesCalls: number;
     dataMode: "actual" | "calendar";
     ratesSubsetSize: number;
   },
-): number {
-  if (!config.autoSync) return 0;
-  // actualモードは自物件＋近似競合の一部のみカレンダー取得、calendarは全物件
-  const ratesTargets =
+): CostEstimate {
+  const round = (v: number) => Math.round(v * 100) / 100;
+  // カタログ(検索)は全エリアを取得: エリアごとに最大 (物件上限100 ÷ ページ10)=10ページ
+  const searchesPerRefresh = ALL_AREAS.length * 10;
+  const catalogRefreshUsd = round(searchesPerRefresh * COST_PER_SEARCH_CALL);
+
+  // 1回の料金更新で取得する対象 (手動更新は dailyRatesCalls が上限)
+  const ratesTargetsTotal =
     config.dataMode === "actual"
       ? Math.min(config.ratesSubsetSize, trackedProperties) + 1 // +1 = 自物件
       : trackedProperties + 1;
-  const ratesPerMonth = (ratesTargets / Math.max(config.ratesRefreshDays, 1)) * 30;
-  // カタログ(検索)は全物件を取得: エリアごとに (物件上限 ÷ ページサイズ10) 回
-  const searchesPerRefresh = ALL_AREAS.length * 10;
+  const ratesPerSync = Math.min(config.dailyRatesCalls + 1, ratesTargetsTotal);
+  const ratesSyncUsd = round(ratesPerSync * COST_PER_RATES_CALL);
+
+  // 自動同期ON時の月額: 料金は周期ごとに対象全件、カタログは searchRefreshDays ごとに1回
+  const ratesPerMonth = (ratesTargetsTotal / Math.max(config.ratesRefreshDays, 1)) * 30;
   const searchPerMonth = (searchesPerRefresh / Math.max(config.searchRefreshDays, 1)) * 30;
-  return (
-    Math.round(
-      (ratesPerMonth * COST_PER_RATES_CALL + searchPerMonth * COST_PER_SEARCH_CALL) * 100,
-    ) / 100
+  const monthlyIfAutoUsd = round(
+    ratesPerMonth * COST_PER_RATES_CALL + searchPerMonth * COST_PER_SEARCH_CALL,
   );
+
+  return { autoSync: config.autoSync, catalogRefreshUsd, ratesSyncUsd, monthlyIfAutoUsd };
 }

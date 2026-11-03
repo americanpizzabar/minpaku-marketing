@@ -16,6 +16,8 @@ export interface SyncRunOptions {
   force?: boolean;
   /** 物件カタログ (検索) のみ即時再取得し、料金カレンダーは取得しない */
   catalogOnly?: boolean;
+  /** カタログ検索($0.50/回)を一切行わず料金カレンダーのみ更新する (通常の手動更新用) */
+  skipCatalog?: boolean;
   /** このチェーンで残っている料金取得の上限 (チェーン継続用。undefined=設定値) */
   cap?: number | null;
 }
@@ -77,10 +79,10 @@ export async function runChunkedSync(
   const cap =
     opts.reset || opts.force ? null : opts.cap === undefined ? config.dailyRatesCalls : opts.cap;
 
-  const result = await syncStep(db, syncType, cap, config);
+  const result = await syncStep(db, syncType, cap, config, { skipCatalog: opts.skipCatalog });
 
   if (result.status === "PARTIAL") {
-    chainNext(result.capRemaining);
+    chainNext(result.capRemaining, opts.skipCatalog ?? false);
   }
 
   return result;
@@ -110,7 +112,7 @@ export async function refreshOneListing(
 }
 
 /** 残作業の処理を新しい関数インスタンスに引き継ぐ (リクエスト送信のみ保証し応答は待たない) */
-function chainNext(capRemaining: number | null): void {
+function chainNext(capRemaining: number | null, skipCatalog: boolean): void {
   const secret = cleanEnv(process.env.CRON_SECRET);
   const host =
     cleanEnv(process.env.VERCEL_PROJECT_PRODUCTION_URL) ?? cleanEnv(process.env.VERCEL_URL);
@@ -121,7 +123,8 @@ function chainNext(capRemaining: number | null): void {
     return;
   }
 
-  const url = `https://${host}/api/sync?key=${encodeURIComponent(secret)}&cap=${capRemaining === null ? "none" : capRemaining}`;
+  const skipParam = skipCatalog ? "&skipCatalog=1" : "";
+  const url = `https://${host}/api/sync?key=${encodeURIComponent(secret)}&cap=${capRemaining === null ? "none" : capRemaining}${skipParam}`;
   console.log(`AirROI sync: 残作業を引き継ぎ (cap=${capRemaining ?? "無制限"})`);
 
   const controller = new AbortController();

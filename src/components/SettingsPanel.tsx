@@ -73,6 +73,12 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
   const [configured, setConfigured] = useState(true);
   const [tracked, setTracked] = useState<number | null>(null);
   const [monthlyCost, setMonthlyCost] = useState<number | null>(null);
+  const [costEstimate, setCostEstimate] = useState<{
+    autoSync: boolean;
+    catalogRefreshUsd: number;
+    ratesSyncUsd: number;
+    monthlyIfAutoUsd: number;
+  } | null>(null);
   const [form, setForm] = useState<SettingsState | null>(null);
 
   useEffect(() => {
@@ -88,6 +94,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
         setForm(toFormState(json.config));
         setTracked(json.trackedProperties);
         setMonthlyCost(json.estimatedMonthlyCostUsd);
+        setCostEstimate(json.costEstimate ?? null);
       })
       .catch(() => setMessage("設定の読み込みに失敗しました"))
       .finally(() => setLoading(false));
@@ -173,6 +180,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
       if (json.saved) {
         setForm(toFormState(json.config));
         setMonthlyCost(json.estimatedMonthlyCostUsd);
+        setCostEstimate(json.costEstimate ?? null);
         setMessage("設定を保存し、グラフに反映しました");
         // サーバーコンポーネントを再取得してKPI・グラフを即時更新する
         router.refresh();
@@ -280,10 +288,13 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                   value={String(form.dailyRatesCalls)}
                   onChange={(e) => setForm({ ...form, dailyRatesCalls: Number(e.target.value) })}
                 >
-                  <option value="20">20件 (約$2)</option>
-                  <option value="40">40件 (約$4)</option>
-                  <option value="80">80件 (約$8)</option>
+                  <option value="20">20件 (料金のみ 約$2)</option>
+                  <option value="40">40件 (料金のみ 約$4)</option>
+                  <option value="80">80件 (料金のみ 約$8)</option>
                 </select>
+                <p className="mt-1 text-[11px] text-slate-400">
+                  これは料金カレンダー($0.10/件)の上限です。エリア検索カタログ($0.50/ページ・全更新で約$25)は含まれません。
+                </p>
               </div>
 
               <div>
@@ -293,10 +304,13 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                   value={String(form.searchRefreshDays)}
                   onChange={(e) => setForm({ ...form, searchRefreshDays: Number(e.target.value) })}
                 >
-                  <option value="30">30日ごと (標準)</option>
-                  <option value="60">60日ごと</option>
-                  <option value="90">90日ごと</option>
+                  <option value="30">30日ごと (高コスト)</option>
+                  <option value="60">60日ごと (推奨)</option>
+                  <option value="90">90日ごと (低コスト)</option>
                 </select>
+                <p className="mt-1 text-[11px] text-slate-400">
+                  カタログ全更新1回で約$25。周期を延ばすほど月額が下がります (設備・立地はあまり変わらないため60〜90日を推奨)。
+                </p>
               </div>
 
               <div>
@@ -525,16 +539,39 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                 ))}
               </div>
 
-              <p className="text-xs text-slate-500">
-                追跡中: {tracked ?? "-"}物件
-                {monthlyCost !== null && (
-                  <>
-                    {" "}
-                    / 推定月額コスト: <span className="font-semibold">${monthlyCost}</span>
-                    {!form.autoSync && " (自動同期オフ)"}
-                  </>
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5 text-xs text-slate-600">
+                <p className="font-semibold text-slate-700">
+                  推定API料金（追跡中 {tracked ?? "-"}物件）
+                </p>
+                {costEstimate ? (
+                  <ul className="mt-1.5 space-y-1">
+                    <li className="flex justify-between gap-2">
+                      <span>料金カレンダー更新1回（手動）</span>
+                      <span className="font-semibold text-slate-800">
+                        最大 ${costEstimate.ratesSyncUsd}
+                      </span>
+                    </li>
+                    <li className="flex justify-between gap-2">
+                      <span>カタログ全更新1回（エリア検索・約$25）</span>
+                      <span className="font-semibold text-slate-800">
+                        最大 ${costEstimate.catalogRefreshUsd}
+                      </span>
+                    </li>
+                    <li className="flex justify-between gap-2 border-t border-slate-200 pt-1">
+                      <span>自動同期ON時の月額（カタログ＋料金）</span>
+                      <span className="font-semibold text-slate-800">
+                        ${costEstimate.monthlyIfAutoUsd}/月
+                      </span>
+                    </li>
+                  </ul>
+                ) : (
+                  monthlyCost !== null && <p className="mt-1">推定月額: ${monthlyCost}</p>
                 )}
-              </p>
+                <p className="mt-1.5 text-[11px] text-slate-400">
+                  「データ手動更新」は料金カレンダーのみ（カタログ検索は行いません）。カタログの$25は「物件情報を今すぐ更新」または自動同期でのみ発生します。
+                  {!form.autoSync && " 現在は自動同期オフのため、月額は手動更新した分だけ発生します。"}
+                </p>
+              </div>
 
               <button
                 onClick={save}

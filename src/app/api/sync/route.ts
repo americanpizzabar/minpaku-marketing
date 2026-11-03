@@ -39,6 +39,7 @@ export async function GET(request: NextRequest) {
       reset: params.get("reset") === "1",
       force: params.get("force") === "1",
       catalogOnly: params.get("catalog") === "1",
+      skipCatalog: params.get("skipCatalog") === "1",
       cap,
     });
     return NextResponse.json(result, { status: result.status === "FAILED" ? 500 : 200 });
@@ -49,11 +50,15 @@ export async function GET(request: NextRequest) {
 }
 
 /** サイドバーの「データ手動更新」ボタンから呼び出される手動同期 (既定の呼び出し上限つき)。
- *  `?catalog=1` で物件カタログ (実績・料金設定等) のみ即時再取得する。 */
+ *  `?catalog=1` で物件カタログ (実績・料金設定等) のみ即時再取得する。
+ *  通常の手動更新は料金カレンダーのみ (skipCatalog)。カタログ検索($25)は専用ボタン/自動同期のみ。 */
 export async function POST(request: NextRequest) {
   try {
+    const catalogOnly = request.nextUrl.searchParams.get("catalog") === "1";
     const result = await runChunkedSync("manual_refresh", {
-      catalogOnly: request.nextUrl.searchParams.get("catalog") === "1",
+      catalogOnly,
+      // カタログ専用更新以外は、不意の$25カタログ検索を避けて料金カレンダーのみ更新する
+      skipCatalog: !catalogOnly,
     });
     return NextResponse.json(result, { status: result.status === "FAILED" ? 500 : 200 });
   } catch (err) {

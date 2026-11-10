@@ -369,10 +369,24 @@ export interface Simulation {
   lockedRevenue: number; // 予約済の日の売上 (両シナリオ共通)
   scenarios: SimulationScenario[]; // low / central / high
   central: SimulationScenario | null;
-  /** 推奨追従の売上 = 据え置きの売上 となる弾力性 (逼迫補正なし, [-5, -0.1] で二分探索)。
-   *  需要がこれより非弾力的 (0 に近い) なら推奨追従が有利。符号が変わらなければ null */
-  breakEvenElasticity: number | null;
+  /**
+   * 損益分岐の予約数変化 (需要モデルに依存しない)。値上げ日・値下げ日を分けて、
+   * 「各日が現在価格で同じ確率で予約される」とした場合に推奨追従と売上が等しくなる予約数の変化率。
+   * (一定弾力性モデルの損益分岐の弾力性は価格や日によらず常に −1 になり情報が無いため、こちらを使う)
+   */
+  breakEven: {
+    raise: BreakEvenGroup | null; // 推奨 > 据え置き の空室日
+    lower: BreakEvenGroup | null; // 推奨 < 据え置き の空室日
+  };
   assumptions: string[]; // 日本語の前提一覧
+}
+
+export interface BreakEvenGroup {
+  days: number;
+  avgChangePct: number; // 据え置き価格の合計に対する推奨価格の合計の変化率 (%, 小数1桁)
+  /** 売上が据え置きと等しくなる予約数の変化率 (%, 小数1桁)。
+   *  raise: 負の値 = この割合まで予約が減っても売上は維持 / lower: 正の値 = この割合以上予約が増えれば元が取れる */
+  bookingChangePct: number;
 }
 
 export type AlertKind =

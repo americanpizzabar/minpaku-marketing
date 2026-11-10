@@ -169,16 +169,24 @@ export default function DayDetail({
         </div>
         <div>
           <p className="text-[10px] text-slate-500">乖離率</p>
-          <p className={`text-sm font-semibold ${changeClass(pricing.changePct)}`}>{changeLabel(pricing.changePct)}</p>
+          <p className={`text-sm font-semibold ${own.status === "vacant" ? changeClass(pricing.changePct) : "text-slate-400"}`}>
+            {own.status === "vacant" ? changeLabel(pricing.changePct) : "—"}
+          </p>
           <p className="text-[10px] text-slate-400">{ACTION_LABEL[pricing.action]}</p>
         </div>
       </div>
 
       <Section title="自社の状況">
         <div className="flex flex-wrap items-center gap-2">
-          <span className={`rounded px-2 py-0.5 text-xs font-semibold ${ownChipClass(own.status)}`}>
-            {OWN_STATUS_LABEL[own.status]}
-          </span>
+          {own.statusSource === "none" ? (
+            <span className="rounded border border-dashed border-slate-300 px-2 py-0.5 text-xs text-slate-500">
+              不明（空室と仮定して推奨を算出）
+            </span>
+          ) : (
+            <span className={`rounded px-2 py-0.5 text-xs font-semibold ${ownChipClass(own.status)}`}>
+              {OWN_STATUS_LABEL[own.status]}
+            </span>
+          )}
           <span className="text-[11px] text-slate-500">出所: {OWN_STATUS_SOURCE_LABEL[own.statusSource]}</span>
         </div>
         <div className="mt-1.5 flex flex-wrap gap-1.5">

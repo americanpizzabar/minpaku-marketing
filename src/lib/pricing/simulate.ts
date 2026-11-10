@@ -1,21 +1,28 @@
 /**
  * 推奨価格追従時の想定売上シミュレーション (仕様 4.1 サマリーKPI)。
  *
- * 【担当: pricing-engine】このファイルは契約スタブ。シグネチャを変えずに実装すること。
- *
- * 目的: 推奨に従った場合と、従わずに据え置いた場合の空室日の想定売上を、需要の価格感応度 (弾力性 ε)
- * の仮定ごとに比較する。結果の符号は ε の仮定に強く依存するため、損益分岐の ε (breakEvenElasticity) も必ず出す。
+ * 目的: 推奨に従った場合と、従わずに据え置いた場合の空室日の想定売上を比較する。
+ * 結果は需要の価格感応度 (弾力性 ε) の仮定に強く依存するため、2段構えで示す:
+ *   1. 損益分岐の予約数変化 (breakEven, 需要モデルに依存しない): 値上げ日・値下げ日を分けて、
+ *      「予約が何%減っても (増えれば) 推奨追従の売上が据え置き以上か」= Σ据え置き価格 / Σ推奨価格 − 1。
+ *      各日が現在価格で同じ確率で予約されると仮定した、価格だけで決まる値。
+ *      (一定弾力性モデルの「損益分岐の弾力性」は売上 ∝ P^(1+ε) のため価格や日によらず常に −1 になり、
+ *       値上げ日と値下げ日で有利な向きも逆になるため使わない)
+ *   2. 弾力性3シナリオの試算 (scenarios): 下記モデルによる売上の差。仮定の幅として示す。
  *
  * モデル (自社が vacant の将来日 d, リードタイム L ごと):
  *   F = curves[night.type].fitted を lead → occ/100 の関数に (無ければもう一方の区分の曲線。両方空なら available=false)
  *     F(L) = lead が L に最も近い点の値、F0 = 最小 lead の点の値
- *   残り在庫の成約確率 (条件付きピックアップ): q = F(L) < 1 ? clamp((F0 − F(L)) / (1 − F(L)), 0, 0.95) : 0
+ *   残り在庫の成約確率 (条件付きピックアップ):
+ *     市場がこれから埋める量 Δ = F0 − F(L) を、その日の競合の残り在庫 (1 − 現在の占有率) で割る。
+ *     q = clamp(Δ / (1 − occNow), 0, 0.95)   occNow = その日の競合占有率 (dataQuality "ok" の日のみ。無ければ F(L))
+ *     → 競合が埋まっている日ほど残りの部屋が予約されやすい (逼迫を反映)。曲線が平坦 (Δ=0) なら q=0
  *   品質調整した参照価格: typeBase = basePrice × (1 + δ) (pricing.delta.value)
  *     ref = market.compAdr != null かつ 区分の compAdr 中央値 M_type が非 null
  *           ? typeBase × market.compAdr / M_type   (市場の日別の高低だけを反映し、自社の品質プレミアムは割高とみなさない)
  *           : typeBase
  *     M_type = horizon 内の同区分の日の compAdr の中央値
- *   弾力性 ε_d = ε × (1 − tightnessDamping × occNow)  (occNow = (market.occ ?? 0)/100。既定 tightnessDamping=0 = 一定)
+ *   弾力性 ε_d = ε × (1 − tightnessDamping × occNow)  (既定 tightnessDamping=0 = 一定)
  *   成約確率 p(P) = clamp(q × (P / ref)^ε_d, 0, 0.95)
  *   売上 = Σ P × p(P)、泊数 = Σ p(P)   (据え置き価格 と 推奨価格 でそれぞれ計算)
  * 据え置き価格 (baseline):
@@ -27,16 +34,12 @@
  * - "blocked" の日はスキップ
  * - 3シナリオ ε = cfg.elasticity.low/central/high。label: "価格感応度: 低" / "価格感応度: 中（標準）" / "価格感応度: 高"
  * - upliftPct = currentRevenue > 0 ? (recommendedRevenue − currentRevenue)/currentRevenue × 100 (小数1桁) : null
- * - breakEvenElasticity: tightnessDamping=0 として recommendedRevenue(ε) − currentRevenue(ε) の符号が
- *   ε ∈ [−5, −0.1] の両端で異なれば二分探索 (40回) で求めた ε (小数2桁)、異ならなければ null
- * - 金額は整数円、泊数は小数1桁に丸める
- * - assumptions (日本語, 必ず含める): 予約曲線による残り在庫の成約確率、参照価格は自社の品質プレミアムを保った市場連動価格、
- *   弾力性は実測ではなく仮定 (3シナリオの値)、損益分岐の弾力性の意味、予約済日は比較対象外、
- *   baseline が assumed_seasonal ならその旨と「設定で現在価格を入力すると実価格で比較」
+ * - 金額は整数円、泊数・%は小数1桁に丸める
  * - 計算可能な空室日が 0 日なら available=false, reason に理由 (例: "予約曲線が未算出（競合カレンダー取得後に表示）")
  */
 import type {
   BookingCurve,
+  BreakEvenGroup,
   DayRecommendation,
   NightType,
   PricingConfig,
@@ -45,8 +48,6 @@ import type {
 } from "./types";
 
 const P_MAX = 0.95;
-const BREAK_EVEN_LO = -5;
-const BREAK_EVEN_HI = -0.1;
 
 const SEASONAL_LABEL = "固定シーズン料金（基準価格×週末係数・仮定）";
 
@@ -154,6 +155,7 @@ export function simulateRevenue(
 
   let bookedDays = 0;
   let lockedRevenue = 0;
+  let zeroPickupDays = 0;
   const simDays: SimDay[] = [];
   for (const d of days) {
     const typeBase = typeBaseOf(d);
@@ -181,12 +183,18 @@ export function simulateRevenue(
     const ref = adr != null && Number.isFinite(adr) && adr > 0 && m != null && m > 0 ? (typeBase * adr) / m : typeBase;
     if (!(ref > 0) || !(basePriceForDay > 0)) continue;
     const fL = curve.at(d.lead);
-    const q = fL < 1 ? clamp((curve.f0 - fL) / (1 - fL), 0, P_MAX) : 0;
-    const occNow = d.market.occ != null && Number.isFinite(d.market.occ) ? clamp(d.market.occ / 100, 0, 1) : 0;
+    const mOcc =
+      d.market.dataQuality === "ok" && d.market.occ != null && Number.isFinite(d.market.occ)
+        ? clamp(d.market.occ / 100, 0, 1)
+        : null;
+    // 市場がこれから埋める量を、その日の競合の残り在庫で割る (埋まっている日ほど残りの部屋が予約されやすい)
+    const remainingShare = 1 - (mOcc ?? fL);
+    const q = remainingShare > 0 ? clamp((curve.f0 - fL) / remainingShare, 0, P_MAX) : 0;
+    if (!(q > 0)) zeroPickupDays++;
     simDays.push({
       q: Number.isFinite(q) ? q : 0,
       ref,
-      occNow,
+      occNow: mOcc ?? 0,
       baseline: basePriceForDay,
       recommended: d.pricing.recommended,
     });
@@ -195,10 +203,10 @@ export function simulateRevenue(
   const baselineLabel = baseline === "current" ? "現在価格" : SEASONAL_LABEL;
   const e = cfg.elasticity;
   const assumptions: string[] = [
-    "空室日の成約確率は、競合の予約曲線から求めた「残り在庫がこれから埋まる確率」（条件付きピックアップ）を基準にしています",
+    "損益分岐の予約数変化は価格だけから求めた値で、需要の仮定に依存しません（各日が現在価格で同じ確率で予約されるとした場合）",
+    "試算の成約確率は、競合の予約曲線で市場がこれから埋める量を、その日の競合の残り在庫で割った値です（競合が埋まっている日ほど高い）",
     "参照価格は自社の品質プレミアムを保った市場連動価格（基準価格×曜日係数×その日の競合中央価格/区分の中央値）で、自社の価格水準そのものは割高とみなしていません",
-    `需要の価格弾力性は実測ではなく仮定です（低 ${e.low} / 中 ${e.central} / 高 ${e.high} の3シナリオ）`,
-    "損益分岐の弾力性: 需要の弾力性がこの値より非弾力的（0に近い）なら推奨価格への追従が有利、より弾力的なら据え置きが有利です",
+    `試算の需要の価格弾力性は実測ではなく仮定です（低 ${e.low} / 中 ${e.central} / 高 ${e.high} の3シナリオ）。売上の差の符号はこの仮定に強く依存します`,
     "予約済の日の売上は両シナリオ共通（比較対象外）、ブロック日は除外しています",
   ];
   if (damping > 0) {
@@ -210,6 +218,12 @@ export function simulateRevenue(
     );
   } else if (nonAssumed < vacant.length) {
     assumptions.push("現在価格が仮定値の空室日は比較から除外しています");
+  }
+
+  if (zeroPickupDays > 0) {
+    assumptions.push(
+      `${zeroPickupDays}日は予約曲線上これ以上の予約が見込めない（曲線が平坦な）リードタイムのため、試算では売上0としています`,
+    );
   }
 
   const base = {
@@ -225,7 +239,7 @@ export function simulateRevenue(
     let reason = "比較できる空室日がありません";
     if (!hasCurve) reason = "予約曲線が未算出（競合カレンダー取得後に表示）";
     else if (vacant.length > 0 && !days.some((d) => typeBaseOf(d) > 0)) reason = "自社基準価格が未設定のため算出できません";
-    return { available: false, reason, ...base, scenarios: [], central: null, breakEvenElasticity: null };
+    return { available: false, reason, ...base, scenarios: [], central: null, breakEven: { raise: null, lower: null } };
   }
 
   const defs: { key: SimulationScenario["key"]; label: string; elasticity: number }[] = [
@@ -250,33 +264,23 @@ export function simulateRevenue(
     };
   });
 
-  // 損益分岐の弾力性 (逼迫補正なし)
-  const diff = (eps: number): number => {
-    const r = evaluate(simDays, eps, 0);
-    return r.rec - r.cur;
+  // 損益分岐の予約数変化 (価格だけで決まる。値上げ日・値下げ日を分ける)
+  const group = (pick: (d: SimDay) => boolean): BreakEvenGroup | null => {
+    const g = simDays.filter(pick);
+    if (g.length === 0) return null;
+    const sumBase = g.reduce((s, d) => s + d.baseline, 0);
+    const sumRec = g.reduce((s, d) => s + d.recommended, 0);
+    if (!(sumBase > 0) || !(sumRec > 0)) return null;
+    return {
+      days: g.length,
+      avgChangePct: round((sumRec / sumBase - 1) * 100, 1),
+      bookingChangePct: round((sumBase / sumRec - 1) * 100, 1),
+    };
   };
-  let breakEvenElasticity: number | null = null;
-  let lo = BREAK_EVEN_LO;
-  let hi = BREAK_EVEN_HI;
-  let dLo = diff(lo);
-  const dHi = diff(hi);
-  if (Number.isFinite(dLo) && Number.isFinite(dHi) && dLo * dHi < 0) {
-    for (let i = 0; i < 40; i++) {
-      const mid = (lo + hi) / 2;
-      const dMid = diff(mid);
-      if (dMid === 0) {
-        lo = hi = mid;
-        break;
-      }
-      if (dLo * dMid < 0) {
-        hi = mid;
-      } else {
-        lo = mid;
-        dLo = dMid;
-      }
-    }
-    breakEvenElasticity = round((lo + hi) / 2, 2);
-  }
+  const breakEven = {
+    raise: group((d) => d.recommended > d.baseline),
+    lower: group((d) => d.recommended > 0 && d.recommended < d.baseline),
+  };
 
   return {
     available: true,
@@ -284,6 +288,6 @@ export function simulateRevenue(
     ...base,
     scenarios,
     central: scenarios.find((s) => s.key === "central") ?? null,
-    breakEvenElasticity,
+    breakEven,
   };
 }

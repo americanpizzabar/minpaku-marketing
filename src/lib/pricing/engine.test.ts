@@ -128,6 +128,13 @@ describe("betaCoef (JSDoc の例)", () => {
       near(betaCoef(market({ pace, newBookings: 2 }), 20, WD, cfg).value, expected);
     });
   }
+  it("データ不足の日 (dataQuality != ok) は pace があっても 0 (α と同じ基準)", () => {
+    for (const dataQuality of ["low", "none"] as const) {
+      const b = betaCoef(market({ pace: 30, newBookings: 3, dataQuality }), 20, WD, cfg);
+      assert.equal(b.value, 0);
+      assert.match(b.reason, /競合データ不足/);
+    }
+  });
   it("新規予約1件なら pace 30 でも 0 (reason に理由)", () => {
     const r = betaCoef(market({ pace: 30, newBookings: 1 }), 20, WD, cfg);
     assert.equal(r.value, 0);
@@ -337,6 +344,17 @@ describe("priceDay", () => {
       assert.equal(r.changePct, null);
       assert.equal(r.action, "hold");
     }
+  });
+  it("閾値 0 でも乖離 0 は hold (値上げ扱いにしない)", () => {
+    const c0 = { ...cfg, alerts: { ...cfg.alerts, changePct: 0 } };
+    const r = priceDay({ ...base, cfg: c0, currentPrice: priceDay({ ...base, cfg: c0 }).recommended, currentPriceSource: "manual" });
+    assert.equal(r.changePct, 0);
+    assert.equal(r.action, "hold");
+  });
+  it("基準価格が未設定なら推奨は仮の値なので実価格と比較しない (乖離率 null・hold)", () => {
+    const r = priceDay({ ...base, basePrice: 0, currentPrice: 300000, currentPriceSource: "api" });
+    assert.equal(r.changePct, null);
+    assert.equal(r.action, "hold");
   });
   it("予約済/ブロックの action", () => {
     assert.equal(priceDay({ ...base, ownStatus: "booked" }).action, "booked");

@@ -177,7 +177,8 @@ export function centralPrice(prices: number[], stat: "median" | "trimmed"): numb
  *     occ = (expectedBooked + k·prior) / (effectiveUnits + k) × 100
  *     80% 信用区間: a = expectedBooked + k·prior + 0.5, b = effectiveUnits − expectedBooked + k·(1−prior) + 0.5,
  *       m = a/(a+b), sd = sqrt(ab / ((a+b)²(a+b+1))), [m − 1.2816·sd, m + 1.2816·sd] を 0..1 に丸めて×100
- * - remaining = 有効行で available=true の数。remainingEst = units > 0 ? round(remaining × members.length / units) : null
+ * - remaining = 有効行で available=true の数。remainingEst = units > 0 ? round(remaining × M / units) : null
+ *   (M = calendarStatus が "failed" でない member 数 (掲載終了の可能性がある物件は外挿しない)、ただし M >= units)
  * - compAdr = centralPrice(有効行で available かつ price>0 の価格, config.adrStat)、priceCount = その個数
  * - maxAgeDays = 使った有効行の age の最大 (無ければ null)
  * - listings = 有効行の { id, available, price: available && price>0 ? price : null } (member の距離順)
@@ -196,6 +197,7 @@ export function computeMarketDays(
   const typeOf = nightTypeResolver(nights, config);
   const ids = new Set(members.map((m) => m.id));
   const orderedMembers = [...members].sort((a, b) => a.distanceKm - b.distanceKm);
+  const liveMembers = members.filter((m) => m.calendarStatus !== "failed").length;
 
   // 宿泊日 → (物件 → 行)。同じ (物件, 日) が複数あれば取得日の新しい方
   const idx = new Map<string, Map<string, CalendarRow>>();
@@ -308,6 +310,9 @@ export function computeMarketDays(
       const sd = Math.sqrt((alpha * beta) / (s * s * (s + 1)));
       const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
       occCi = [round1(clamp01(mean - 1.2816 * sd) * 100), round1(clamp01(mean + 1.2816 * sd) * 100)];
+      // 縮小なし (k=0) では点推定と区間 (+0.5 の Jeffreys) がずれうるため、区間が点推定を必ず含むようにする
+      if (occ < occCi[0]) occCi = [occ, occCi[1]];
+      if (occ > occCi[1]) occCi = [occCi[0], occ];
     }
 
     const dataQuality: MarketDay["dataQuality"] = !hasData
@@ -326,7 +331,7 @@ export function computeMarketDays(
       occ,
       occCi,
       remaining: a.remaining,
-      remainingEst: a.units > 0 ? Math.round((a.remaining * members.length) / a.units) : null,
+      remainingEst: a.units > 0 ? Math.round((a.remaining * Math.max(a.units, liveMembers)) / a.units) : null,
       compAdr: centralPrice(a.prices, config.adrStat),
       priceCount: a.prices.length,
       maxAgeDays: a.maxAge,
@@ -530,7 +535,8 @@ export function computePace(
 
 /**
  * computeMarketDays の結果に Pace を書き込み (破壊的更新)、要注意日を判定する。
- * spike = pace != null && pace >= config.spike.minPt && (newBookings ?? 0) >= config.spike.minNewBookings
+ * spike = dataQuality == "ok" && pace != null && pace >= config.spike.minPt && (newBookings ?? 0) >= config.spike.minNewBookings
+ * (占有率が使えないデータ不足の日は要注意日にしない)
  */
 export function applyPace(market: Map<string, MarketDay>, pace: PaceResult, config: PricingConfig): void {
   for (const [d, m] of market) {
@@ -543,7 +549,10 @@ export function applyPace(market: Map<string, MarketDay>, pace: PaceResult, conf
       m.newBookings = p.newBookings;
     }
     m.spike =
-      m.pace !== null && m.pace >= config.spike.minPt && (m.newBookings ?? 0) >= config.spike.minNewBookings;
+      m.dataQuality === "ok" &&
+      m.pace !== null &&
+      m.pace >= config.spike.minPt &&
+      (m.newBookings ?? 0) >= config.spike.minNewBookings;
   }
 }
 
@@ -682,6 +691,8 @@ function buildCurve(type: NightType, obs: CurveObs[], config: PricingConfig): Bo
  *   (2) 現在の市場: market の各日 (lead = d − today) の listings の各物件 (source "current")
  *   ただし (2) と同じ (p, d) で s = その物件の最新スナップショット日のものは (1) から除く (二重計上防止)
  *   各観測は ブロック補正の (b, e) を持つ。区分は classifyNight(d, config.peakPeriods).type。
+ *   ピーク期間 (年末年始など peakPeriod != null) の夜は除外する (早くから埋まるため、通常の週末の
+ *   予約タイミングに混ぜると単調化で曲線が平坦になり、週末の傾向がピークに引きずられる)
  * - points (散布図): 区分ごとに (宿泊日 d, lead を 3日刻みに丸めた L3 = 3·round(L/3)) で観測をまとめ、
  *   観測数 >= minUnitsForSignal の組だけ Σb/Σe×100 を1点に (lead = L3)。source は組の中に (2) 由来があれば
  *   "current"、無ければ "snapshot"。区分ごとに最大 400 点へ等間隔に間引く (sampleSize は間引き前)。
@@ -700,6 +711,15 @@ export function buildBookingCurves(
   const r = reservedShareFor(members, config);
   const ids = new Set(members.map((m) => m.id));
   const typeOf = nightTypeResolver(null, config);
+  const peakMemo = new Map<string, boolean>();
+  const isPeak = (d: string): boolean => {
+    let v = peakMemo.get(d);
+    if (v === undefined) {
+      v = classifyNight(d, config.peakPeriods).peakPeriod != null;
+      peakMemo.set(d, v);
+    }
+    return v;
+  };
   const H = config.horizonDays;
   const obs: Record<NightType, CurveObs[]> = { weekday: [], weekend: [] };
 
@@ -707,7 +727,7 @@ export function buildBookingCurves(
   const currentKeys = new Set<string>();
   for (const [d, md] of market) {
     const lead = diffDays(today, d);
-    if (lead < 0 || lead > H) continue;
+    if (lead < 0 || lead > H || isPeak(d)) continue;
     for (const l of md.listings) {
       const key = `${l.id}|${d}`;
       if (currentKeys.has(key)) continue;
@@ -728,7 +748,7 @@ export function buildBookingCurves(
   for (const s of snapshots) {
     if (!ids.has(s.propertyId)) continue;
     const lead = diffDays(s.snapshotDate, s.date);
-    if (lead < 0 || lead > H) continue;
+    if (lead < 0 || lead > H || isPeak(s.date)) continue;
     const key = `${s.propertyId}|${s.date}`;
     if (latestSnap.get(s.propertyId) === s.snapshotDate && currentKeys.has(key)) continue;
     const rowKey = `${s.snapshotDate}|${key}`;

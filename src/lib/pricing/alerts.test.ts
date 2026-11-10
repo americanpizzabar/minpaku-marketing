@@ -117,11 +117,20 @@ describe("weekend_low_inventory", () => {
     assert.equal(a[0].kind, "weekend_low_inventory");
     assert.equal(a[0].severity, "high");
     assert.equal(a[0].date, SAT);
-    assert.match(a[0].message, /^11\/21\(土\) 週末の競合 7件中 5件が予約済・残り2室（推定）/);
+    assert.match(a[0].message, /^11\/21\(土\) 週末の競合 取得7件中 5件が予約済・空き2件。強気設定の好機$/);
+  });
+  it("観測した空き件数と CompSet 全体への推定を分けて書く", () => {
+    const a = deriveAlerts([day({ date: SAT, type: "weekend", market: { ...lowInv, remainingEst: 3 } })], cfg);
+    assert.match(a[0].message, /取得7件中 5件が予約済・空き2件（CompSet全体で残り約3室）。/);
   });
   it("自社が予約済なら info", () => {
     const a = deriveAlerts([day({ date: SAT, type: "weekend", status: "booked", market: lowInv })], cfg);
     assert.equal(a[0].severity, "info");
+  });
+  it("自社の予約状況が未連携なら medium (空室と決めつけない)", () => {
+    const a = deriveAlerts([day({ date: SAT, type: "weekend", market: lowInv, statusSource: "none" })], cfg);
+    assert.equal(a.find((x) => x.kind === "weekend_low_inventory")?.severity, "medium");
+    assert.match(a[0].message, /自社の予約状況は未連携/);
   });
   it("units=3, remaining=3 (誰も予約していない) → アラートなし", () => {
     const a = deriveAlerts(
@@ -154,6 +163,9 @@ describe("weekday_spike / spike", () => {
     assert.equal(a[0].severity, "high");
     assert.match(a[0].message, /\+25pt\/7日/);
     assert.match(a[0].message, /新規予約3件/);
+  });
+  it("データ不足の日 (dataQuality low) は Pace が高くても出さない", () => {
+    assert.deepEqual(deriveAlerts([day({ market: { pace: 25, newBookings: 3, dataQuality: "low" } })], cfg), []);
   });
   it("新規1件 / pace 14.9 / pace null は出さない", () => {
     assert.deepEqual(deriveAlerts([day({ market: { pace: 25, newBookings: 1 } })], cfg), []);

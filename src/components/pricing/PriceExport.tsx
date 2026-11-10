@@ -73,6 +73,9 @@ export default function PriceExport({ d }: { d: PricingDashboard }) {
       <p className="mb-2 rounded-lg bg-amber-50 px-2 py-1.5 text-[11px] leading-relaxed text-amber-900">
         Airbnb には価格を CSV で一括取り込みする機能がありません。下の一覧を見ながら、Airbnb アプリのカレンダーで
         期間を選んで価格を入力してください（自社が空室の日のみ・同じ価格の連続日はまとめています）。
+        {(d.status.ownStatusSource === "none" || d.status.ownStatusSource === "mixed") && (
+          <> 予約状況が未連携の日も空室として含まれているため、予約済みの日は入力不要です。</>
+        )}
       </p>
       {ranges.error ? (
         <p className="text-xs text-rose-600">一覧を作成できませんでした: {ranges.error}</p>

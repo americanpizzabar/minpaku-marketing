@@ -250,4 +250,36 @@ describe("computePricingDashboard (統合)", () => {
     assert.ok(d.days.some((x) => x.pricing.changePct !== null), "乖離率自体は参考値として残る");
     assert.ok(!d.alerts.some((a) => a.kind === "raise_opportunity" || a.kind === "discount_needed"));
   });
+  it("CompSet が小さすぎるときは有料の取得ではなく条件の見直しを促す", () => {
+    const candidates = [candidate(0), candidate(1)]; // 2件とも新鮮だが minUnitsForSignal 未満
+    const d = computePricingDashboard(buildInputs({ candidates }), NOW);
+    assert.equal(d.status.mode, "no_market_data");
+    const w = d.status.warnings.join("\n");
+    assert.match(w, /CompSetが2件で、市場シグナルに必要な\d+件に足りない/);
+    assert.doesNotMatch(w, /競合連動にするには「競合カレンダーを取得」/);
+  });
+
+  it("Pace 未算出の案内は自動取得のオン/オフで変える (オフなら2回目の取得が必要と伝える)", () => {
+    const base = buildInputs();
+    // 比較用の古いスナップショットを除く → Pace は算出できない
+    const single = { ...base, snapshots: base.snapshots.filter((x) => x.snapshotDate === addDaysStr(TODAY, -1)) };
+    const off = computePricingDashboard(single, NOW);
+    assert.equal(off.status.paceAvailable, false);
+    const wOff = off.status.warnings.join("\n");
+    assert.match(wOff, /2回目の取得が必要/);
+    assert.doesNotMatch(wOff, /追加の手動取得は不要/);
+    const cfgOn = { ...DEFAULT_PRICING_CONFIG, compsetAutoRefresh: true };
+    const on = computePricingDashboard({ ...single, config: cfgOn }, NOW);
+    assert.match(on.status.warnings.join("\n"), /自動取得で算出されます（追加の手動取得は不要です）/);
+  });
+
+  it("年末年始の夜は週末より大きいプレミアムに合わせた上限を使う", () => {
+    const d = computePricingDashboard(buildInputs(), NOW);
+    const peak = d.days.find((x) => x.night.peakPeriod != null);
+    const weekend = d.days.find((x) => x.night.type === "weekend" && x.night.peakPeriod == null);
+    assert.ok(peak && weekend);
+    if (d.basePrices.peakPremiumPct > d.basePrices.weekendPremiumPct) {
+      assert.ok(peak.pricing.ceiling >= weekend.pricing.ceiling);
+    }
+  });
 });

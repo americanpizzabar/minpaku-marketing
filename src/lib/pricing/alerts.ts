@@ -8,10 +8,11 @@
  *     night.type=weekend かつ market.dataQuality == "ok" かつ market.remaining < market.units
  *     かつ market.remainingEst != null かつ remainingEst <= cfg.alerts.weekendRemainingMax
  *     かつ (market.occ ?? 0) >= A.midOcc
- *     severity: 自社が vacant なら "high"、それ以外 "info"
- *     message 例: "11/21(土) 週末の競合 7件中 5件が予約済・残り2室（推定）。強気設定の好機"
+ *     severity: 自社が vacant (予約状況が連携済) なら "high"、予約状況が未連携 (statusSource "none") なら "medium"、それ以外 "info"
+ *     message 例: "11/21(土) 週末の競合 取得7件中 5件が予約済・空き2件（CompSet全体で残り約3室）。強気設定の好機"
+ *       (観測した空き件数と、CompSet 全体への推定を分けて書く。両者が同じなら推定は省く)
  * - weekday_spike (仕様6章「直近7日で平日稼働率が跳ねた日」):
- *     night.type=weekday かつ market.pace != null かつ pace >= cfg.alerts.weekdaySpikePt
+ *     night.type=weekday かつ market.dataQuality == "ok" かつ market.pace != null かつ pace >= cfg.alerts.weekdaySpikePt
  *     かつ (market.newBookings ?? 0) >= cfg.spike.minNewBookings → severity "high"。
  *     message に 超過 +Xpt/7日 と新規予約件数
  * - spike: market.spike かつ同日に weekday_spike を出していない → severity "medium"
@@ -54,19 +55,26 @@ export function deriveAlerts(days: DayRecommendation[], cfg: PricingConfig): Pri
       m.remainingEst <= cfg.alerts.weekendRemainingMax &&
       (m.occ ?? 0) >= A.midOcc
     ) {
+      const est = m.remainingEst !== m.remaining ? `（CompSet全体で残り約${m.remainingEst}室）` : "";
+      const head = `${label} 週末の競合 取得${m.units}件中 ${m.unavailable}件が予約済・空き${m.remaining}件${est}。`;
       out.push({
         date: d.date,
         kind: "weekend_low_inventory",
-        severity: vacant ? "high" : "info",
+        severity: !vacant ? "info" : linked ? "high" : "medium",
         message:
-          `${label} 週末の競合 ${m.units}件中 ${m.unavailable}件が予約済・残り${m.remainingEst}室（推定）。` +
-          (vacant ? "強気設定の好機" : `自社は${d.own.status === "booked" ? "予約済" : "ブロック中"}`),
+          head +
+          (!vacant
+            ? `自社は${d.own.status === "booked" ? "予約済" : "ブロック中"}`
+            : linked
+              ? "強気設定の好機"
+              : "自社が空室なら強気設定の好機（自社の予約状況は未連携）"),
       });
     }
 
     let weekdaySpike = false;
     if (
       d.night.type === "weekday" &&
+      m.dataQuality === "ok" &&
       m.pace != null &&
       m.pace >= cfg.alerts.weekdaySpikePt &&
       (m.newBookings ?? 0) >= cfg.spike.minNewBookings

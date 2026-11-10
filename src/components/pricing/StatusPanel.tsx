@@ -58,6 +58,17 @@ export function StatusBanner({ d, api }: { d: PricingDashboard; api: PricingActi
   }
   if (status.mode === "no_market_data") {
     const plan = status.refreshPlan;
+    const members = d.compset.members.length;
+    const min = d.config.minUnitsForSignal;
+    if (members < min) {
+      // CompSet が小さすぎる場合はカレンダーを取得しても競合連動にならない (有料の取得を勧めない)
+      return (
+        <div className="rounded-xl border border-amber-400 bg-amber-50 px-3 py-3 text-xs leading-relaxed text-amber-900">
+          CompSet が{members}件で、競合連動に必要な{min}件に足りないため、現在の推奨は『曜日・直前ルールのみ』です。
+          下の「エンジン設定」で CompSet の条件（半径・価格帯など）を広げてください。
+        </div>
+      );
+    }
     return (
       <div className="space-y-2 rounded-xl border border-amber-400 bg-amber-50 px-3 py-3 text-xs text-amber-900">
         <p className="leading-relaxed">

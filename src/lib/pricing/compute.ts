@@ -13,6 +13,7 @@
  *  7. premium = measurePremiums(dates の {night, market}, cfg)
  *  8. 区分ごとに marketPrices = horizon 内の market[d].listings で price != null のもの ({memberId, price})
  *     (特定連休の夜は weekend に含める)、guard = resolveGuardrails(type, basePrice, premium.weekendPct, marketPrices, cfg)
+ *     特定連休 (peakPeriod != null) の夜は max(weekendPct, peakPct) で求めた上限を使う
  *  9. 自社の現在価格 (各日): own 行 (無ければ status "vacant", statusSource "none", apiPrice null) について
  *       apiPrice != null → currentPrice = apiPrice, source "api"
  *       それ以外で cfg.ownPriceWeekend/Weekday (night.type に対応する方。特定連休は weekend) が非 null → source "manual"
@@ -43,10 +44,13 @@
  *       - basePrice <= 0: "自社基準価格が未設定です（設定画面で入力してください）"
  *       - members < effective.minSize: "CompSetが{n}件と少なく、占有率の推定誤差が大きくなります"
  *       - relaxations が非空: "条件を緩和してCompSetを構成: {relaxations.join('、')}"
- *       - mode "no_market_data": "競合カレンダーが未取得/古いため、推奨価格は曜日・直前ルールのみで算出されています（競合連動にするには「競合カレンダーを取得」）"
+ *       - mode "no_market_data": 原因別に1つ。members < minUnitsForSignal → CompSet が小さい (条件を広げる。取得は勧めない)、
+ *           freshCount < minUnitsForSignal → "競合カレンダーが未取得/古いため…（競合連動にするには「競合カレンダーを取得」）"、
+ *           それ以外 → 取得済みカレンダーが対象期間をカバーしていない
  *       - 0 < freshCount < members: "{members − fresh}件のカレンダーが未取得/古い状態です"
  *       - failed の member があれば: "{k}件はカレンダーを取得できませんでした（掲載終了の可能性）"
- *       - !paceAvailable かつ paceAvailableFrom: "Pace（消化ペース）は {M/D} 以降の取得で算出されます（追加の手動取得は不要です）"
+ *       - !paceAvailable かつ paceAvailableFrom: 自動取得オン → "{M/D} 以降の自動取得で算出（追加の手動取得は不要）"、
+ *           オフ → 2回目の取得が必要 ({M/D}以降に「競合カレンダーを取得」)。paceAvailableFrom が無く自動取得オフ → 急増は検知されない旨
  *       - paceAvailable かつ cfg.compsetRefreshDays > 1: "差分検知は前日比ではなく約{paceWindowDays}日間隔のスナップショット比較です（費用削減のため）"
  *       - ownStatusSource "none": "自社の予約状況が未連携です（iCal連携または手動入力で反映）"
  *       - icalConfigured かつ icalLastImport が (null か !ok か 2日以上前): "iCal取り込みが{at}以降失敗/停止しています（{error}）"
@@ -184,6 +188,15 @@ export function computePricingDashboard(inputs: PricingInputs, now?: string): Pr
     weekday: resolveGuardrails("weekday", basePrice, premium.weekendPct, pricesByType.weekday, cfg),
     weekend: resolveGuardrails("weekend", basePrice, premium.weekendPct, pricesByType.weekend, cfg),
   };
+  // 特定連休 (年末年始など) の夜は週末より大きいプレミアムが乗るため、上限もそのプレミアムで求める
+  // (週末の上限で切ると、ピークのプレミアムが打ち消される)
+  const guardPeak = resolveGuardrails(
+    "weekend",
+    basePrice,
+    Math.max(premium.weekendPct, premium.peakPct),
+    pricesByType.weekend,
+    cfg,
+  );
 
   // 9. 自社の現在価格 (api > 設定画面の入力値 > 基準価格からの仮定) と日別の推奨価格
   const ownByDate = new Map<string, OwnDay>();
@@ -218,7 +231,7 @@ export function computePricingDashboard(inputs: PricingInputs, now?: string): Pr
       currentPrice,
       currentPriceSource,
       premium: premiumArg,
-      guard: guard[night.type],
+      guard: night.peakPeriod != null ? guardPeak : guard[night.type],
       cfg,
     });
     return { date, lead, night, market: m, own: { status, statusSource, currentPrice, currentPriceSource }, pricing };
@@ -311,9 +324,21 @@ export function computePricingDashboard(inputs: PricingInputs, now?: string): Pr
     warnings.push(`条件を緩和してCompSetを構成: ${compset.relaxations.join("、")}`);
   }
   if (mode === "no_market_data") {
-    warnings.push(
-      "競合カレンダーが未取得/古いため、推奨価格は曜日・直前ルールのみで算出されています（競合連動にするには「競合カレンダーを取得」）",
-    );
+    const min = cfg.minUnitsForSignal;
+    if (members.length < min) {
+      // カレンダーを取得しても解消しない (有料の取得を勧めない)
+      warnings.push(
+        `CompSetが${members.length}件で、市場シグナルに必要な${min}件に足りないため、推奨価格は曜日・直前ルールのみで算出されています（設定でCompSetの条件を広げてください）`,
+      );
+    } else if (compset.freshCount < min) {
+      warnings.push(
+        "競合カレンダーが未取得/古いため、推奨価格は曜日・直前ルールのみで算出されています（競合連動にするには「競合カレンダーを取得」）",
+      );
+    } else {
+      warnings.push(
+        `取得済みの競合カレンダーが対象期間の日付を${min}件以上カバーしていないため、推奨価格は曜日・直前ルールのみで算出されています`,
+      );
+    }
   }
   if (compset.freshCount > 0 && compset.freshCount < members.length) {
     warnings.push(`${members.length - compset.freshCount}件のカレンダーが未取得/古い状態です`);
@@ -321,7 +346,15 @@ export function computePricingDashboard(inputs: PricingInputs, now?: string): Pr
   const failed = members.filter((m) => m.calendarStatus === "failed").length;
   if (failed > 0) warnings.push(`${failed}件はカレンダーを取得できませんでした（掲載終了の可能性）`);
   if (!paceAvailable && pace.paceAvailableFrom) {
-    warnings.push(`Pace（消化ペース）は ${md(pace.paceAvailableFrom)} 以降の取得で算出されます（追加の手動取得は不要です）`);
+    warnings.push(
+      cfg.compsetAutoRefresh
+        ? `Pace（消化ペース）は ${md(pace.paceAvailableFrom)} 以降の自動取得で算出されます（追加の手動取得は不要です）`
+        : `Pace（消化ペース）の算出には2回目の取得が必要です。競合の自動取得がオフのため、${md(pace.paceAvailableFrom)}以降（初回の取得から3〜7日後）に「競合カレンダーを取得」を実行してください`,
+    );
+  } else if (!paceAvailable && !isDemo && !cfg.compsetAutoRefresh && compset.freshCount > 0) {
+    warnings.push(
+      "Pace（消化ペース）は3〜7日間隔の2回の取得から算出します。競合の自動取得がオフのため、予約の急増は検知されません",
+    );
   }
   if (paceAvailable && cfg.compsetRefreshDays > 1) {
     const w = pace.paceWindowDays ?? cfg.compsetRefreshDays;

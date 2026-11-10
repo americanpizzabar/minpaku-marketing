@@ -103,11 +103,17 @@ export default function Timeline({
           {...common}
           label="自社 状況"
           cell={(d) => ({
-            node: (
-              <span className={`rounded px-1 py-0.5 text-[10px] font-semibold ${ownChipClass(d.own.status)}`}>
-                {OWN_STATUS_LABEL[d.own.status]}
-              </span>
-            ),
+            node:
+              d.own.statusSource === "none" ? (
+                // 未連携の日は空室と決めつけない (推奨は空室と仮定して算出)
+                <span className="rounded border border-dashed border-slate-300 px-1 py-0.5 text-[10px] text-slate-400">
+                  不明
+                </span>
+              ) : (
+                <span className={`rounded px-1 py-0.5 text-[10px] font-semibold ${ownChipClass(d.own.status)}`}>
+                  {OWN_STATUS_LABEL[d.own.status]}
+                </span>
+              ),
           })}
         />
         <Row
@@ -149,7 +155,15 @@ export default function Timeline({
           {...common}
           label="乖離率"
           cell={(d) => ({
-            node: <span className={`text-[10px] font-semibold ${changeClass(d.pricing.changePct)}`}>{changeLabel(d.pricing.changePct, 0)}</span>,
+            // 予約済・ブロックの日は価格を動かせないので乖離率を出さない
+            node:
+              d.own.status !== "vacant" ? (
+                <span className="text-slate-300">—</span>
+              ) : (
+                <span className={`text-[10px] font-semibold ${changeClass(d.pricing.changePct)}`}>
+                  {changeLabel(d.pricing.changePct, 0)}
+                </span>
+              ),
           })}
         />
 

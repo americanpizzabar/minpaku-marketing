@@ -131,12 +131,17 @@ export function alphaCoef(market: MarketDay, lead: number, night: NightClass, cf
  *     (期待積み増し室数 = (paceExpected ?? 0)/100 × units × (paceDays ?? 7)/7) :
  *     −B.stagnantMax × (1 − lead/B.stagnantMaxLead) %  (当日に近いほど大きい。lead=stagnantMaxLead で 0)
  * - それ以外: 0 (pace が surgePt 以上でも新規予約が足りない場合は reason にその旨)
+ * - market.dataQuality != "ok" の日は pace があっても 0 (α と同じく、データ不足の日に補正しない)
  * 例 (既定値, newBookings=2): pace 10→+5%, 20→+10%, 30→+15%, 50→+15%; newBookings=1 で pace 30→0;
  *   pace −2, lead 0, 期待1室以上→−5%; lead 15→−2.5%; lead 30→0; 期待0.5室→0
  */
 export function betaCoef(market: MarketDay, lead: number, night: NightClass, cfg: PricingConfig): CoefficientDetail {
   const B = cfg.beta[night.type];
   const pace = market.pace;
+  // 占有率が使えない日 (有効物件数不足・カレンダーが古い) は Pace も信頼できない (α と同じ基準)
+  if (market.dataQuality !== "ok" && pace != null) {
+    return { value: 0, reason: `競合データ不足のためPace補正なし（有効${market.units}件）` };
+  }
   if (pace == null || !Number.isFinite(pace)) {
     let why = "比較スナップショット不足";
     if (market.units === 0) why = "競合カレンダーなし";
@@ -354,10 +359,12 @@ export function resolveGuardrails(
  * rawPrice = round(basePrice × (1+δ)(1+α)(1+β)(1+γ))
  * recommended = clamp(round(rawPrice / roundTo) × roundTo, floor, ceiling)
  * clampedBy = round(rawPrice/roundTo)×roundTo が floor 未満なら "floor"、ceiling 超なら "ceiling"、それ以外 null
- * changePct = currentPrice != null かつ currentPriceSource != "assumed" かつ currentPrice > 0
+ * changePct = basePrice > 0 かつ currentPrice != null かつ currentPriceSource != "assumed" かつ currentPrice > 0
  *   ? (recommended − currentPrice)/currentPrice × 100 (小数1桁) : null
+ *   (基準価格が未設定の推奨は下限値などの仮の値なので、実価格と比較しない)
  * action: ownStatus booked → "booked", blocked → "blocked", changePct == null → "hold", signal "rules_only" → "hold" (競合データ無しで実価格を動かす根拠にしない),
- *   changePct >= +alerts.changePct → "raise" (値上げ余地), changePct <= −alerts.changePct → "lower", それ以外 "hold"
+ *   changePct > 0 かつ >= +alerts.changePct → "raise" (値上げ余地), changePct < 0 かつ <= −alerts.changePct → "lower",
+ *   それ以外 "hold" (閾値 0 でも乖離 0 は hold)
  * signal: market.dataQuality != "ok" → "rules_only"、market.pace == null → "partial"、それ以外 "market"
  */
 export function priceDay(args: {
@@ -392,7 +399,11 @@ export function priceDay(args: {
     clampedBy = "ceiling";
   }
   const changePct =
-    currentPrice != null && currentPriceSource !== "assumed" && Number.isFinite(currentPrice) && currentPrice > 0
+    basePrice > 0 &&
+    currentPrice != null &&
+    currentPriceSource !== "assumed" &&
+    Number.isFinite(currentPrice) &&
+    currentPrice > 0
       ? roundTo(((recommended - currentPrice) / currentPrice) * 100, 1)
       : null;
   const signal: DayPricing["signal"] =
@@ -404,8 +415,8 @@ export function priceDay(args: {
   // 競合データの無い日 (曜日・直前ルールのみの推奨) は、実際の販売価格を上げ下げする根拠にしない。
   // 推奨価格と乖離率は参考として表示するが、値上げ/値下げの判定・アラートは出さない
   else if (signal === "rules_only") action = "hold";
-  else if (changePct >= cfg.alerts.changePct) action = "raise";
-  else if (changePct <= -cfg.alerts.changePct) action = "lower";
+  else if (changePct > 0 && changePct >= cfg.alerts.changePct) action = "raise";
+  else if (changePct < 0 && changePct <= -cfg.alerts.changePct) action = "lower";
   else action = "hold";
   return {
     basePrice,

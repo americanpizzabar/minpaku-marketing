@@ -162,8 +162,10 @@ function alphaOf(v: unknown, base: AlphaConfig): AlphaConfig {
   // 帯の順序 lowOcc <= midOcc < highOcc を保証し、上下限の逆転を防ぐ
   if (cfg.midOcc >= cfg.highOcc) cfg.midOcc = cfg.highOcc - 1;
   if (cfg.lowOcc > cfg.midOcc) cfg.lowOcc = cfg.midOcc;
-  if (cfg.highMax < cfg.highMin) cfg.highMax = cfg.highMin;
   if (cfg.midMax < cfg.midMin) cfg.midMax = cfg.midMin;
+  // 係数も帯の順に単調にする (中位の上限 > 高位の下限だと、競合が埋まって高位帯に入った瞬間に推奨が下がる)
+  if (cfg.highMin < cfg.midMax) cfg.highMin = cfg.midMax;
+  if (cfg.highMax < cfg.highMin) cfg.highMax = cfg.highMin;
   if (cfg.lowMax < cfg.lowMin) cfg.lowMax = cfg.lowMin;
   return cfg;
 }

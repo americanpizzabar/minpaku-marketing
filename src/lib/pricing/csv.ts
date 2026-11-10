@@ -93,7 +93,7 @@ export function toDetailCsv(d: PricingDashboard): string {
       x.night.type === "weekend" ? "週末" : "平日",
       x.night.reason,
       x.lead,
-      STATUS_LABEL[x.own.status],
+      x.own.statusSource === "none" ? "不明(未連携)" : STATUS_LABEL[x.own.status],
       x.own.currentPrice,
       PRICE_SOURCE_LABEL[x.own.currentPriceSource],
       p.recommended,

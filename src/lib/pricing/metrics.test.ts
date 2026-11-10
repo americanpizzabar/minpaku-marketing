@@ -346,6 +346,7 @@ test("computePace: 比較できる過去スナップショットが無い / 古�
 test("applyPace: 値の書き込みと spike 判定 (minPt 20, minNewBookings 2)", () => {
   const dates = ["2026-11-30", "2026-12-01", "2026-12-02", "2026-12-03"];
   const market = computeMarketDays(dates, nightsOf(dates), [], [], cfg(), TODAY);
+  for (const m of market.values()) m.dataQuality = "ok";
   const pace: PaceResult = {
     byDate: new Map([
       ["2026-11-30", { pace: 20, paceRaw: 25, paceExpected: 5, paceDays: 7, newBookings: 2 }],
@@ -369,6 +370,11 @@ test("applyPace: 値の書き込みと spike 判定 (minPt 20, minNewBookings 2)
   assert.equal(market.get("2026-12-02")?.spike, false);
   assert.equal(market.get("2026-12-03")?.spike, false);
   assert.equal(market.get("2026-12-03")?.pace, null);
+  // 占有率が使えないデータ不足の日は、Pace が閾値を超えても要注意日にしない
+  const weak = computeMarketDays(["2026-11-30"], nightsOf(["2026-11-30"]), [], [], cfg(), TODAY);
+  applyPace(weak, pace, cfg());
+  assert.equal(weak.get("2026-11-30")?.pace, 20);
+  assert.equal(weak.get("2026-11-30")?.spike, false);
 });
 
 /* ------------------------------------------------------------------ */

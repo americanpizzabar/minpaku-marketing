@@ -1,7 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
-import type { PricingDashboard, Simulation } from "@/lib/pricing/types";
+import type { BreakEvenGroup, PricingDashboard, Simulation } from "@/lib/pricing/types";
 import { mdw, num1, pct, yen } from "./shared";
 
 function KpiCard({ title, children, className = "" }: { title: string; children: ReactNode; className?: string }) {
@@ -34,28 +34,25 @@ function OccBar({ label, value, days, color }: { label: string; value: number | 
 const signedYen = (v: number) => `${v >= 0 ? "+" : "−"}${yen(Math.abs(v))}`;
 const signedPct = (v: number | null) => (v === null ? "—" : `${v >= 0 ? "+" : "−"}${num1(Math.abs(v))}%`);
 
-/**
- * 損益分岐の弾力性の文。推奨が値上げ寄りなら「非弾力的なら有利」、値下げ寄りなら「弾力的なら有利」になるため、
- * シナリオの結果から向きを判定する (判定できなければ契約の既定文)。
- */
-function breakEvenSentence(sim: Simulation): string | null {
-  const be = sim.breakEvenElasticity;
-  const withUplift = sim.scenarios.filter((s) => s.upliftPct !== null && Number.isFinite(s.upliftPct));
-  if (be === null || !Number.isFinite(be)) {
-    if (withUplift.length === 0) return null;
-    if (withUplift.every((s) => (s.upliftPct ?? 0) > 0)) return "想定した弾力性の範囲では、いずれも推奨追従が有利です";
-    if (withUplift.every((s) => (s.upliftPct ?? 0) < 0)) return "想定した弾力性の範囲では、いずれも据え置きが有利です";
-    return null;
-  }
-  const ref = withUplift.find((s) => s.upliftPct !== 0 && Math.abs(s.elasticity - be) > 1e-6);
-  let inelasticFavors = true;
-  if (ref) inelasticFavors = ref.elasticity > be === (ref.upliftPct ?? 0) > 0;
-  const b = be.toFixed(2).replace("-", "−");
-  // 一定弾力性のモデルでは損益分岐はほぼ常に −1 付近になる (値上げで客がちょうど比例して減る点)。
-  // 計算結果ではなく「どちらの仮定なら有利か」の目安として示す。
-  return inelasticFavors
-    ? `損益分岐の弾力性は ${b}。値上げしても客が減りにくい市場（弾力性が0に近い）なら推奨追従が有利、価格に敏感な市場なら据え置きが有利です。弾力性は実測値ではないため目安としてご覧ください`
-    : `損益分岐の弾力性は ${b}。価格に敏感な市場（弾力性の絶対値が大きい）なら推奨追従が有利、値上げしても客が減りにくい市場なら据え置きが有利です。弾力性は実測値ではないため目安としてご覧ください`;
+function BreakEvenLine({ kind, g }: { kind: "raise" | "lower"; g: BreakEvenGroup }) {
+  const raise = kind === "raise";
+  return (
+    <p className="text-[11px] leading-snug text-slate-700">
+      <span className={`font-bold ${raise ? "text-rose-600" : "text-blue-600"}`}>
+        {raise ? "値上げ" : "値下げ"} {g.days}日
+      </span>
+      <span className="text-slate-500">（平均 {signedPct(g.avgChangePct)}）</span>:{" "}
+      {raise ? (
+        <>
+          予約が <span className="font-bold">{num1(Math.abs(g.bookingChangePct))}%</span> 減っても売上は同等以上
+        </>
+      ) : (
+        <>
+          予約が <span className="font-bold">{num1(g.bookingChangePct)}%</span> 以上増えれば売上増
+        </>
+      )}
+    </p>
+  );
 }
 
 function SimulationCard({ sim }: { sim: Simulation }) {
@@ -68,38 +65,44 @@ function SimulationCard({ sim }: { sim: Simulation }) {
   }
   const c = sim.central;
   const diff = c.recommendedRevenue - c.currentRevenue;
-  const ups = sim.scenarios.map((s) => s.upliftPct).filter((v): v is number => v !== null && Number.isFinite(v));
-  const lo = ups.length > 0 ? Math.min(...ups) : null;
-  const hi = ups.length > 0 ? Math.max(...ups) : null;
-  const sentence = breakEvenSentence(sim);
+  const { raise, lower } = sim.breakEven;
   return (
-    <KpiCard title="想定売上シミュレーション（空室日・感応度 中）" className="col-span-2">
-      <div className="grid grid-cols-2 gap-2">
-        <div>
-          <p className="text-[10px] text-slate-500">推奨追従</p>
-          <p className="text-base font-bold text-indigo-700">{yen(c.recommendedRevenue)}</p>
-          <p className="text-[10px] text-slate-400">想定 {num1(c.recommendedNights)}泊</p>
+    <KpiCard title={`想定売上シミュレーション（空室 ${sim.vacantDays}日・${sim.baselineLabel}と比較）`} className="col-span-2">
+      <p className="text-[10px] font-semibold text-slate-500">損益分岐（価格だけで決まる目安）</p>
+      {raise || lower ? (
+        <div className="mt-0.5 space-y-0.5">
+          {raise && <BreakEvenLine kind="raise" g={raise} />}
+          {lower && <BreakEvenLine kind="lower" g={lower} />}
         </div>
-        <div>
-          <p className="text-[10px] text-slate-500">{sim.baselineLabel}</p>
-          <p className="text-base font-bold text-slate-700">{yen(c.currentRevenue)}</p>
-          <p className="text-[10px] text-slate-400">想定 {num1(c.currentNights)}泊</p>
-        </div>
-      </div>
-      <p className={`mt-1 text-sm font-bold ${diff >= 0 ? "text-emerald-700" : "text-rose-600"}`}>
-        差額 {signedYen(diff)}（{signedPct(c.upliftPct)}）
-      </p>
-      {lo !== null && hi !== null && (
-        <p className="text-[11px] text-slate-600">
-          感応度 低〜高: {signedPct(lo)} 〜 {signedPct(hi)}
-          <span className="ml-1 text-slate-400">
-            （{sim.scenarios.map((s) => `${s.label.replace("価格感応度: ", "")} ε=${s.elasticity}`).join(" / ")}）
-          </span>
-        </p>
+      ) : (
+        <p className="text-[11px] text-slate-500">推奨価格は{sim.baselineLabel}と同じです</p>
       )}
-      {sentence && <p className="mt-1 rounded-lg bg-slate-50 px-2 py-1 text-[11px] text-slate-700">{sentence}</p>}
-      <p className="mt-1 text-[10px] text-slate-400">
-        空室 {sim.vacantDays}日が対象。予約済 {sim.bookedDays}日の売上 {yen(sim.lockedRevenue)} は両者共通。
+
+      <p className="mt-2 text-[10px] font-semibold text-slate-500">需要の価格感応度を仮定した試算</p>
+      <div className="mt-0.5 grid grid-cols-3 gap-1">
+        {sim.scenarios.map((s) => {
+          const up = s.upliftPct;
+          return (
+            <div key={s.key} className={`rounded-lg px-1.5 py-1 ${s.key === "central" ? "bg-slate-100" : "bg-slate-50"}`}>
+              <p className="text-[10px] text-slate-500">
+                {s.label.replace("価格感応度: ", "").replace("（標準）", "")}
+                <span className="ml-0.5 text-slate-400">ε{s.elasticity}</span>
+              </p>
+              <p
+                className={`text-sm font-bold ${up === null ? "text-slate-400" : up >= 0 ? "text-emerald-700" : "text-rose-600"}`}
+              >
+                {signedPct(up)}
+              </p>
+            </div>
+          );
+        })}
+      </div>
+      <p className="mt-1 text-[11px] text-slate-600">
+        中: 推奨追従 <span className="font-semibold text-indigo-700">{yen(c.recommendedRevenue)}</span>（想定{num1(c.recommendedNights)}泊）
+        vs {yen(c.currentRevenue)}（{num1(c.currentNights)}泊）= <span className={diff >= 0 ? "text-emerald-700" : "text-rose-600"}>{signedYen(diff)}</span>
+      </p>
+      <p className="mt-0.5 text-[10px] text-slate-400">
+        弾力性は実測値ではない仮定のため、試算の符号は仮定次第です。予約済 {sim.bookedDays}日の売上 {yen(sim.lockedRevenue)} は両者共通。
       </p>
       {sim.assumptions.length > 0 && (
         <details className="mt-1 text-[11px] text-slate-500">
@@ -136,7 +139,12 @@ export default function KpiSummary({
       <SimulationCard sim={d.simulation} />
 
       <KpiCard title="要注意日（Spike Dates）" className="col-span-2 lg:col-span-1">
-        {k.spikeDates.length === 0 ? (
+        {!d.status.paceAvailable ? (
+          <p className="text-xs text-slate-400">
+            Pace（予約の消化ペース）が未算出のため判定できません
+            {d.status.paceAvailableFrom ? `（${mdw(d.status.paceAvailableFrom)}以降の取得で算出）` : ""}
+          </p>
+        ) : k.spikeDates.length === 0 ? (
           <p className="text-xs text-slate-400">直近7日で予約が急増した日はありません</p>
         ) : (
           <div className="flex flex-wrap gap-1">

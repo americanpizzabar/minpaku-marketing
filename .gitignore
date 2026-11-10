@@ -31,3 +31,6 @@ next-env.d.ts
 # local sqlite
 *.db
 *.db-journal
+
+# Claude Code の一時ワークツリー
+/.claude/worktrees/

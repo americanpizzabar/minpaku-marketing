@@ -25,12 +25,63 @@ import type {
   PricingConfig,
 } from "./types";
 
+function roundTo(x: number, digits: number): number {
+  if (!Number.isFinite(x)) return 0;
+  const f = 10 ** digits;
+  const r = Math.round(x * f) / f;
+  return r === 0 ? 0 : r; // -0 を 0 にそろえる
+}
+
+function clamp(x: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, x));
+}
+
+/** 表示用の数値 (小数1桁まで、末尾の .0 は省く) */
+function fmtNum(x: number): string {
+  return String(roundTo(x, 1));
+}
+
+/** 表示用の符号付き % ("+17%" / "−9%" / "±0%") */
+function fmtSignedPct(pct: number): string {
+  const r = roundTo(pct, 1);
+  if (r === 0) return "±0%";
+  return `${r > 0 ? "+" : "−"}${fmtNum(Math.abs(r))}%`;
+}
+
+/** 符号付きの pt 表記 ("+24" / "−3") */
+function fmtSignedPt(pt: number): string {
+  const r = roundTo(pt, 1);
+  if (r === 0) return "±0";
+  return `${r > 0 ? "+" : "−"}${fmtNum(Math.abs(r))}`;
+}
+
+/** 係数 (% 指定) を小数第3位で丸めた CoefficientDetail にする。reason の末尾に「→ ±X%」を付ける */
+function coef(pct: number, prefix: string): CoefficientDetail {
+  const value = roundTo(pct / 100, 3);
+  return { value, reason: `${prefix} → ${fmtSignedPct(value * 100)}` };
+}
+
+function median(xs: number[]): number | null {
+  if (xs.length === 0) return null;
+  const s = [...xs].sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 === 1 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
+/** 線形補間のパーセンタイル (p は 0..1) */
+function percentile(xs: number[], p: number): number | null {
+  if (xs.length === 0) return null;
+  const s = [...xs].sort((a, b) => a - b);
+  const pos = clamp(p, 0, 1) * (s.length - 1);
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  return s[lo] + (s[hi] - s[lo]) * (pos - lo);
+}
+
 /** a + (b − a)·t。t は 0..1 にクランプ。t が非有限 (0/0 等) なら t = 1 とみなす */
 export function lerp(a: number, b: number, t: number): number {
-  void a;
-  void b;
-  void t;
-  throw new Error("not implemented");
+  const tt = Number.isFinite(t) ? clamp(t, 0, 1) : 1;
+  return a + (b - a) * tt;
 }
 
 /**
@@ -44,11 +95,31 @@ export function lerp(a: number, b: number, t: number): number {
  *   29(lead14)→−10.333%, 0(lead0)→−20%, 10(lead15)→0
  */
 export function alphaCoef(market: MarketDay, lead: number, night: NightClass, cfg: PricingConfig): CoefficientDetail {
-  void market;
-  void lead;
-  void night;
-  void cfg;
-  throw new Error("not implemented");
+  const A = cfg.alpha[night.type];
+  const occ = market.occ;
+  if (market.dataQuality !== "ok" || occ == null || !Number.isFinite(occ)) {
+    return { value: 0, reason: `競合データ不足のため補正なし（有効${market.units}件）` };
+  }
+  const o = fmtNum(occ);
+  if (occ >= A.highOcc) {
+    const pct = lerp(A.highMin, A.highMax, (occ - A.highOcc) / (100 - A.highOcc));
+    return coef(pct, `競合占有率 ${o}%（${fmtNum(A.highOcc)}%以上）: 市場在庫の払底`);
+  }
+  if (occ >= A.midOcc) {
+    const pct = lerp(A.midMin, A.midMax, (occ - A.midOcc) / (A.highOcc - A.midOcc));
+    return coef(pct, `競合占有率 ${o}%（${fmtNum(A.midOcc)}〜${fmtNum(A.highOcc)}%）: 需要が堅調`);
+  }
+  if (A.lowOcc > 0 && occ < A.lowOcc) {
+    if (lead <= A.lowMaxLead) {
+      const pct = -lerp(A.lowMin, A.lowMax, (A.lowOcc - occ) / A.lowOcc);
+      return coef(pct, `競合占有率 ${o}%（${fmtNum(A.lowOcc)}%未満・${lead}日前）: 直前需給低迷のため集客優先`);
+    }
+    return {
+      value: 0,
+      reason: `競合占有率 ${o}%（${fmtNum(A.lowOcc)}%未満だが${A.lowMaxLead}日より先）: 中立帯のため補正なし`,
+    };
+  }
+  return { value: 0, reason: `競合占有率 ${o}%: 中立帯（${fmtNum(A.midOcc)}%未満）のため補正なし` };
 }
 
 /**
@@ -64,11 +135,39 @@ export function alphaCoef(market: MarketDay, lead: number, night: NightClass, cf
  *   pace −2, lead 0, 期待1室以上→−5%; lead 15→−2.5%; lead 30→0; 期待0.5室→0
  */
 export function betaCoef(market: MarketDay, lead: number, night: NightClass, cfg: PricingConfig): CoefficientDetail {
-  void market;
-  void lead;
-  void night;
-  void cfg;
-  throw new Error("not implemented");
+  const B = cfg.beta[night.type];
+  const pace = market.pace;
+  if (pace == null || !Number.isFinite(pace)) {
+    let why = "比較スナップショット不足";
+    if (market.units === 0) why = "競合カレンダーなし";
+    else if (market.paceRaw != null) why = "予約曲線が未算出のため通常ペースを差し引けない";
+    return { value: 0, reason: `Pace未算出（${why}）` };
+  }
+  const nb = market.newBookings ?? 0;
+  const minNb = cfg.spike.minNewBookings;
+  if (pace >= B.surgePt) {
+    if (nb >= minNb) {
+      const t = B.surgeFullPt === B.surgePt ? 1 : (pace - B.surgePt) / (B.surgeFullPt - B.surgePt);
+      return coef(lerp(B.surgeMin, B.surgeMax, t), `通常ペースを上回る予約 ${fmtSignedPt(pace)}pt/7日（新規${nb}件）`);
+    }
+    return {
+      value: 0,
+      reason: `通常ペースを上回る予約 ${fmtSignedPt(pace)}pt/7日だが新規予約${nb}件（${minNb}件未満）のため補正なし`,
+    };
+  }
+  if (pace <= -B.stagnantPt && lead <= B.stagnantMaxLead) {
+    // 期待積み増し室数: 通常ならこの期間に何室埋まるはずだったか (1室未満なら「停滞」と言えない)
+    const expectedRooms = ((market.paceExpected ?? 0) / 100) * market.units * ((market.paceDays ?? 7) / 7);
+    if (expectedRooms >= 1) {
+      const pct = -B.stagnantMax * (1 - lead / Math.max(1, B.stagnantMaxLead));
+      return coef(pct, `予約進捗が通常ペースより停滞 ${fmtSignedPt(pace)}pt/7日（${lead}日前）`);
+    }
+    return {
+      value: 0,
+      reason: `予約進捗が通常ペースより遅れ ${fmtSignedPt(pace)}pt/7日だが、期待される積み増しが1室未満のため補正なし`,
+    };
+  }
+  return { value: 0, reason: `消化ペースは通常範囲（超過 ${fmtSignedPt(pace)}pt/7日）: 補正なし` };
 }
 
 /**
@@ -95,19 +194,64 @@ export function gammaCoef(
   occ: number | null,
   cfg: PricingConfig,
 ): CoefficientDetail {
-  void lead;
-  void night;
-  void ownStatus;
-  void occ;
-  void cfg;
-  throw new Error("not implemented");
+  const G = cfg.gamma;
+  const occOk = occ != null && Number.isFinite(occ);
+  if (lead <= G.lastMinuteDays) {
+    const leadLabel = lead <= 0 ? "当日" : `直前${lead}日`;
+    if (ownStatus !== "vacant") {
+      return { value: 0, reason: `${ownStatus === "booked" ? "予約済" : "ブロック中"}のため直前値下げなし` };
+    }
+    const isWeekday = night.type === "weekday";
+    const maxDisc = isWeekday ? G.weekdayMaxDiscount : G.weekendMaxDiscount;
+    const n = G.lastMinuteDays + 1;
+    const base = (-maxDisc * (n - Math.max(0, lead))) / n;
+    const A = cfg.alpha[night.type];
+    let s = 0;
+    if (occOk) {
+      const span = A.highOcc - A.midOcc;
+      s = span > 0 ? clamp((occ - A.midOcc) / span, 0, 1) : occ >= A.highOcc ? 1 : 0;
+    }
+    const typeLabel = isWeekday ? "平日" : "週末";
+    if (s <= 0) return coef(base, `${leadLabel}・未稼働（${typeLabel}）: 段階的ディスカウント`);
+    const o = occOk ? fmtNum(occ) : "—";
+    if (s >= 1) return { value: 0, reason: `${leadLabel}・未稼働だが競合逼迫（占有率${o}%）のため直前値下げなし` };
+    return coef(
+      base * (1 - s),
+      `${leadLabel}・未稼働だが競合逼迫（占有率${o}%）のため割引を${fmtNum((1 - s) * 100)}%に縮小`,
+    );
+  }
+  if (lead >= G.earlyLead) {
+    const head = `早期予約枠（${lead}日前）`;
+    if (G.earlyMode === "discount") return coef(-G.earlyDiscount, `${head}: 早期確約ディスカウント`);
+    if (G.earlyMode === "premium") return coef(G.earlyPremium, `${head}: ハイシーズン先行高値`);
+    if (night.peakPeriod != null) {
+      return coef(G.earlyPremium, `${head}・${night.peakPeriod}: ハイシーズン先行高値`);
+    }
+    if (occOk && occ >= G.earlyStrongOcc) {
+      return coef(
+        G.earlyPremium,
+        `${head}・競合占有率${fmtNum(occ)}%（${fmtNum(G.earlyStrongOcc)}%以上）: ハイシーズン先行高値`,
+      );
+    }
+    return coef(-G.earlyDiscount, `${head}: 早期確約ディスカウント`);
+  }
+  return { value: 0, reason: `リードタイム${lead}日: 補正なし` };
 }
 
 /** δ (曜日属性係数)。night.peakPeriod != null → +peakPct/100、weekend → +weekendPct/100、weekday → 0 */
 export function deltaCoef(night: NightClass, premium: { weekendPct: number; peakPct: number }): CoefficientDetail {
-  void night;
-  void premium;
-  throw new Error("not implemented");
+  if (night.peakPeriod != null) {
+    const value = roundTo(premium.peakPct / 100, 3);
+    return { value, reason: `特定連休（${night.peakPeriod}）: 連休プレミアム ${fmtSignedPct(value * 100)}` };
+  }
+  if (night.type === "weekend") {
+    const value = roundTo(premium.weekendPct / 100, 3);
+    return {
+      value,
+      reason: `週末・ハイバリュー日（${night.reason}）: 週末プレミアム ${fmtSignedPct(value * 100)}`,
+    };
+  }
+  return { value: 0, reason: "平日: 曜日プレミアムなし" };
 }
 
 /**
@@ -124,9 +268,45 @@ export function measurePremiums(
   days: { night: NightClass; market: MarketDay }[],
   cfg: PricingConfig,
 ): { weekendPct: number; peakPct: number; source: "auto" | "fixed" | "fallback" } {
-  void days;
-  void cfg;
-  throw new Error("not implemented");
+  if (cfg.weekendPremiumMode === "fixed") {
+    return { weekendPct: cfg.weekendPremiumPct, peakPct: cfg.peakPremiumPct, source: "fixed" };
+  }
+  // 物件ごとに 平日 / 週末(特定連休を除く) / 特定連休 の販売価格を集める
+  const byMember = new Map<string, { weekday: number[]; weekend: number[]; peak: number[] }>();
+  for (const { night, market } of days) {
+    if (!market) continue;
+    const bucket: "weekday" | "weekend" | "peak" =
+      night.peakPeriod != null ? "peak" : night.type === "weekend" ? "weekend" : "weekday";
+    for (const l of market.listings) {
+      if (!l.available || l.price == null || !Number.isFinite(l.price) || l.price <= 0) continue;
+      let m = byMember.get(l.id);
+      if (!m) {
+        m = { weekday: [], weekend: [], peak: [] };
+        byMember.set(l.id, m);
+      }
+      m[bucket].push(l.price);
+    }
+  }
+  // 同一物件内の価格比 (物件の顔ぶれの違いに左右されない)
+  const ratios = (key: "weekend" | "peak", minCount: number): number[] => {
+    const out: number[] = [];
+    for (const m of byMember.values()) {
+      if (m.weekday.length < 3 || m[key].length < minCount) continue;
+      const wd = median(m.weekday);
+      const other = median(m[key]);
+      if (wd != null && other != null && wd > 0) out.push(other / wd);
+    }
+    return out;
+  };
+  const weekendRatios = ratios("weekend", 3);
+  const peakRatios = ratios("peak", 2);
+  const weekendMeasured = weekendRatios.length >= 3;
+  const peakMeasured = peakRatios.length >= 3;
+  const weekendPct = weekendMeasured
+    ? roundTo(clamp(((median(weekendRatios) ?? 1) - 1) * 100, 0, 50), 1)
+    : cfg.weekendPremiumPct;
+  const peakPct = peakMeasured ? roundTo(clamp(((median(peakRatios) ?? 1) - 1) * 100, 0, 150), 1) : cfg.peakPremiumPct;
+  return { weekendPct, peakPct, source: weekendMeasured ? "auto" : "fallback" };
 }
 
 /**
@@ -147,12 +327,25 @@ export function resolveGuardrails(
   marketPrices: { memberId: string; price: number }[],
   cfg: PricingConfig,
 ): { floor: number; ceiling: number } {
-  void type;
-  void basePrice;
-  void premiumPct;
-  void marketPrices;
-  void cfg;
-  throw new Error("not implemented");
+  const isWeekend = type === "weekend";
+  const unit = cfg.roundTo > 0 ? cfg.roundTo : 1;
+  const floorRaw = isWeekend ? cfg.floorWeekend : cfg.floorWeekday;
+  const fixedCeiling = isWeekend ? cfg.ceilingWeekend : cfg.ceilingWeekday;
+  let ceilingRaw: number;
+  if (cfg.ceilingMode === "fixed" && fixedCeiling != null) {
+    ceilingRaw = fixedCeiling;
+  } else {
+    const bp = Number.isFinite(basePrice) && basePrice > 0 ? basePrice : 0;
+    const prem = Number.isFinite(premiumPct) ? premiumPct : 0;
+    const typeBase = bp * (1 + (isWeekend ? prem / 100 : 0));
+    const valid = marketPrices.filter((m) => Number.isFinite(m.price) && m.price > 0);
+    const distinct = new Set(valid.map((m) => m.memberId)).size;
+    const p95 = valid.length >= 10 && distinct >= 3 ? percentile(valid.map((m) => m.price), 0.95) : null;
+    ceilingRaw = p95 != null ? Math.max(p95 * 1.25, typeBase * 1.4) : typeBase * 1.6;
+  }
+  const floor = Math.ceil((Number.isFinite(floorRaw) ? floorRaw : 0) / unit) * unit;
+  const ceilingRounded = Math.floor((Number.isFinite(ceilingRaw) ? ceilingRaw : 0) / unit) * unit;
+  return { floor, ceiling: Math.max(ceilingRounded, floor) };
 }
 
 /**
@@ -179,6 +372,51 @@ export function priceDay(args: {
   guard: { floor: number; ceiling: number };
   cfg: PricingConfig;
 }): DayPricing {
-  void args;
-  throw new Error("not implemented");
+  const { night, lead, market, ownStatus, currentPrice, currentPriceSource, premium, guard, cfg } = args;
+  const basePrice = Number.isFinite(args.basePrice) && args.basePrice > 0 ? args.basePrice : 0;
+  const delta = deltaCoef(night, premium);
+  const alpha = alphaCoef(market, lead, night, cfg);
+  const beta = betaCoef(market, lead, night, cfg);
+  const gamma = gammaCoef(lead, night, ownStatus, market.occ, cfg);
+  const product = basePrice * (1 + delta.value) * (1 + alpha.value) * (1 + beta.value) * (1 + gamma.value);
+  const rawPrice = Number.isFinite(product) ? Math.max(0, Math.round(product)) : 0;
+  const unit = cfg.roundTo > 0 ? cfg.roundTo : 1;
+  const rounded = Math.round(rawPrice / unit) * unit;
+  let clampedBy: DayPricing["clampedBy"] = null;
+  let recommended = rounded;
+  if (rounded < guard.floor) {
+    recommended = guard.floor;
+    clampedBy = "floor";
+  } else if (rounded > guard.ceiling) {
+    recommended = guard.ceiling;
+    clampedBy = "ceiling";
+  }
+  const changePct =
+    currentPrice != null && currentPriceSource !== "assumed" && Number.isFinite(currentPrice) && currentPrice > 0
+      ? roundTo(((recommended - currentPrice) / currentPrice) * 100, 1)
+      : null;
+  let action: DayPricing["action"];
+  if (ownStatus === "booked") action = "booked";
+  else if (ownStatus === "blocked") action = "blocked";
+  else if (changePct == null) action = "hold";
+  else if (changePct >= cfg.alerts.changePct) action = "raise";
+  else if (changePct <= -cfg.alerts.changePct) action = "lower";
+  else action = "hold";
+  const signal: DayPricing["signal"] =
+    market.dataQuality !== "ok" ? "rules_only" : market.pace == null ? "partial" : "market";
+  return {
+    basePrice,
+    delta,
+    alpha,
+    beta,
+    gamma,
+    rawPrice,
+    floor: guard.floor,
+    ceiling: guard.ceiling,
+    recommended,
+    clampedBy,
+    changePct,
+    action,
+    signal,
+  };
 }

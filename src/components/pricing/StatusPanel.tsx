@@ -90,6 +90,8 @@ function Item({ label, children }: { label: string; children: ReactNode }) {
 export function DataStatusBar({ d, api }: { d: PricingDashboard; api: PricingActions }) {
   const [result, setResult] = useState<string | null>(null);
   const { status, compset } = d;
+  // デモの注意は上部のバナーで表示済みなので重複させない
+  const warnings = status.warnings.filter((w) => !(status.mode === "demo" && w.startsWith("デモデータ")));
   const members = compset.members.length;
   const relaxed = compset.relaxations.length > 0;
 
@@ -149,9 +151,9 @@ export function DataStatusBar({ d, api }: { d: PricingDashboard; api: PricingAct
         <p className="text-[11px] text-rose-600">iCal 取り込みエラー: {status.icalLastImport.error}</p>
       )}
 
-      {status.warnings.length > 0 && (
+      {warnings.length > 0 && (
         <ul className="space-y-1 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-          {status.warnings.map((w, i) => (
+          {warnings.map((w, i) => (
             <li key={i} className="flex gap-1.5">
               <span aria-hidden>⚠</span>
               <span className="min-w-0 break-words">{w}</span>

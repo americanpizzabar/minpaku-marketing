@@ -104,7 +104,7 @@ export default function PricingView({ d }: { d: PricingDashboard }) {
       )}
 
       <DeepDive d={d} />
-      <PastStrip past={d.past} />
+      <PastStrip past={d.past} minUnits={d.config.minUnitsForSignal} />
       <PriceExport d={d} />
       <CompSetTable compset={d.compset} />
       <EngineSettings d={d} api={api} />

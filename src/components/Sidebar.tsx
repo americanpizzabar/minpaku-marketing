@@ -28,7 +28,17 @@ interface DraftFilters {
   priceMax: string;
 }
 
-export default function Sidebar({ dataSource }: { dataSource: "turso" | "demo" }) {
+/**
+ * showFilters=false のページ (価格最適化など独自の対象条件を持つ画面) では検索フィルタを出さず、
+ * スマホで本文が下に押し出されないようナビのみ表示する。
+ */
+export default function Sidebar({
+  dataSource,
+  showFilters = true,
+}: {
+  dataSource: "turso" | "demo";
+  showFilters?: boolean;
+}) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -136,6 +146,8 @@ export default function Sidebar({ dataSource }: { dataSource: "turso" | "demo" }
         </nav>
       </div>
 
+      {showFilters && (
+      <>
       <div>
         <label className={labelClass}>エリア (複数選択可)</label>
         <div className="flex flex-col gap-1 rounded-lg border border-slate-300 bg-white p-2">
@@ -299,6 +311,8 @@ export default function Sidebar({ dataSource }: { dataSource: "turso" | "demo" }
           検索は保存済みデータの集計のみで、API料金はかかりません。データ更新は「⚙ 設定」から。
         </p>
       </div>
+      </>
+      )}
     </aside>
   );
 }

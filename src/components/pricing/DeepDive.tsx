@@ -169,6 +169,18 @@ export default function DeepDive({ d }: { d: PricingDashboard }) {
   const hasReal = rows.some((r) => r.current !== null);
   const hasAssumed = rows.some((r) => r.currentAssumed !== null);
   const hasAdr = rows.some((r) => r.compAdr !== null);
+  // 価格軸の範囲はデータから明示的に求める (週末の帯用の隠し軸と併用すると自動範囲が効かず、
+  // 目盛りが出ない・線が上にはみ出すため)
+  const prices = rows
+    .flatMap((r) => [r.recommended, r.current, r.currentAssumed, r.compAdr])
+    .filter((v): v is number => typeof v === "number" && Number.isFinite(v) && v > 0);
+  const pLo = prices.length ? Math.min(...prices) : 0;
+  const pHi = prices.length ? Math.max(...prices) : 1;
+  const pad = Math.max((pHi - pLo) * 0.08, 5000);
+  const yDomain: [number, number] = [
+    Math.max(0, Math.floor((pLo - pad) / 10000) * 10000),
+    Math.ceil((pHi + pad) / 10000) * 10000,
+  ];
 
   return (
     <Card
@@ -190,8 +202,18 @@ export default function DeepDive({ d }: { d: PricingDashboard }) {
           <ComposedChart data={rows} margin={{ top: 8, right: 8, bottom: 0, left: 0 }} barCategoryGap={0}>
             <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
             <XAxis dataKey="label" tick={{ fontSize: 10 }} interval="preserveStartEnd" minTickGap={18} />
-            <YAxis yAxisId="p" tickFormatter={(v: number) => yenK(v)} width={48} tick={{ fontSize: 10 }} domain={["auto", "auto"]} />
-            <YAxis yAxisId="bg" hide domain={[0, 1]} />
+            <YAxis
+              yAxisId="p"
+              orientation="left"
+              type="number"
+              domain={yDomain}
+              allowDataOverflow
+              tickCount={5}
+              tickFormatter={(v: number) => yenK(v)}
+              width={48}
+              tick={{ fontSize: 10 }}
+            />
+            <YAxis yAxisId="bg" orientation="right" hide type="number" domain={[0, 1]} />
             <Tooltip
               formatter={(v, name) => [yen(Number(v)), String(name)]}
               labelFormatter={(_l, pl) => {

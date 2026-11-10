@@ -15,7 +15,8 @@ export default async function PricingPage() {
   return (
     <div className="flex min-h-screen flex-col lg:flex-row">
       <Suspense>
-        <Sidebar dataSource={dashboard.dataSource} />
+        {/* 価格最適化は CompSet 独自の条件で分析するため、共通の検索フィルタは出さない */}
+        <Sidebar dataSource={dashboard.dataSource} showFilters={false} />
       </Suspense>
       <main className="min-w-0 flex-1 space-y-4 p-4 lg:p-6">
         <div>

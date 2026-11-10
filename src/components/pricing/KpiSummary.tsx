@@ -51,9 +51,11 @@ function breakEvenSentence(sim: Simulation): string | null {
   let inelasticFavors = true;
   if (ref) inelasticFavors = ref.elasticity > be === (ref.upliftPct ?? 0) > 0;
   const b = be.toFixed(2).replace("-", "−");
+  // 一定弾力性のモデルでは損益分岐はほぼ常に −1 付近になる (値上げで客がちょうど比例して減る点)。
+  // 計算結果ではなく「どちらの仮定なら有利か」の目安として示す。
   return inelasticFavors
-    ? `需要の価格弾力性が ${b} より非弾力的（0に近い）なら推奨追従が有利`
-    : `需要の価格弾力性が ${b} より弾力的（絶対値が大きい）なら推奨追従が有利`;
+    ? `損益分岐の弾力性は ${b}。値上げしても客が減りにくい市場（弾力性が0に近い）なら推奨追従が有利、価格に敏感な市場なら据え置きが有利です。弾力性は実測値ではないため目安としてご覧ください`
+    : `損益分岐の弾力性は ${b}。価格に敏感な市場（弾力性の絶対値が大きい）なら推奨追従が有利、値上げしても客が減りにくい市場なら据え置きが有利です。弾力性は実測値ではないため目安としてご覧ください`;
 }
 
 function SimulationCard({ sim }: { sim: Simulation }) {

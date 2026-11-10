@@ -113,11 +113,11 @@ function CalendarCell({
         {yenK(pricing.recommended)}
       </div>
       <div className={`flex items-center justify-between gap-0.5 text-[9px] leading-none ${txt}`}>
-        <span className="flex items-center gap-0.5">
-          {dot ? <span className={`inline-block h-1.5 w-1.5 rounded-full ring-1 ring-white ${dot}`} /> : null}
-          {market.spike && <span aria-label="予約急増">⚡</span>}
+        <span className="flex min-w-0 items-center gap-0.5 overflow-hidden">
+          {dot ? <span className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ring-1 ring-white ${dot}`} /> : null}
+          {market.spike && <span aria-label="予約急増" className="shrink-0 text-[8px]">⚡</span>}
         </span>
-        <span className="truncate">{none ? "—" : pct(Math.round(market.occ ?? 0))}</span>
+        <span className="shrink-0">{none ? "—" : pct(Math.round(market.occ ?? 0))}</span>
       </div>
     </button>
   );

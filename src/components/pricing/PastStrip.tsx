@@ -14,7 +14,8 @@ import {
 } from "./shared";
 
 /** 7. 直近14日の実績 (横スクロールの小さな帯) */
-export default function PastStrip({ past }: { past: PastDay[] }) {
+/** minUnits 未満の物件数で算出した日は推定誤差が大きいので斜線で表示し、物件数 n を併記する */
+export default function PastStrip({ past, minUnits = 3 }: { past: PastDay[]; minUnits?: number }) {
   return (
     <Card title="直近14日の実績" right="実績占有率はブロック補正後">
       {past.length === 0 ? (
@@ -24,7 +25,7 @@ export default function PastStrip({ past }: { past: PastDay[] }) {
           <div className="flex w-max gap-1">
             {past.map((p) => {
               const occ = p.occ;
-              const quality = p.units === 0 || occ === null ? "none" : "ok";
+              const quality = p.units === 0 || occ === null ? "none" : p.units < minUnits ? "low" : "ok";
               return (
                 <div key={p.date} className="w-[72px] shrink-0 overflow-hidden rounded-lg border border-slate-200 text-center">
                   <div className="bg-slate-50 px-1 py-0.5">
@@ -40,6 +41,10 @@ export default function PastStrip({ past }: { past: PastDay[] }) {
                     </p>
                     <p className={`text-[10px] ${quality === "none" ? "text-slate-400" : heatTextClass(occ)}`}>
                       {yenK(p.compAdr)}
+                    </p>
+                    <p className={`text-[9px] ${quality === "none" ? "text-slate-400" : heatTextClass(occ)}`}>
+                      n={p.units}
+                      {quality === "low" ? "（少）" : ""}
                     </p>
                   </div>
                   <div className="space-y-0.5 px-1 py-0.5 text-[9px] leading-tight text-slate-500">

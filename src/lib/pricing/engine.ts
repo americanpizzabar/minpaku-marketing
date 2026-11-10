@@ -356,7 +356,7 @@ export function resolveGuardrails(
  * clampedBy = round(rawPrice/roundTo)×roundTo が floor 未満なら "floor"、ceiling 超なら "ceiling"、それ以外 null
  * changePct = currentPrice != null かつ currentPriceSource != "assumed" かつ currentPrice > 0
  *   ? (recommended − currentPrice)/currentPrice × 100 (小数1桁) : null
- * action: ownStatus booked → "booked", blocked → "blocked", changePct == null → "hold",
+ * action: ownStatus booked → "booked", blocked → "blocked", changePct == null → "hold", signal "rules_only" → "hold" (競合データ無しで実価格を動かす根拠にしない),
  *   changePct >= +alerts.changePct → "raise" (値上げ余地), changePct <= −alerts.changePct → "lower", それ以外 "hold"
  * signal: market.dataQuality != "ok" → "rules_only"、market.pace == null → "partial"、それ以外 "market"
  */
@@ -395,15 +395,18 @@ export function priceDay(args: {
     currentPrice != null && currentPriceSource !== "assumed" && Number.isFinite(currentPrice) && currentPrice > 0
       ? roundTo(((recommended - currentPrice) / currentPrice) * 100, 1)
       : null;
+  const signal: DayPricing["signal"] =
+    market.dataQuality !== "ok" ? "rules_only" : market.pace == null ? "partial" : "market";
   let action: DayPricing["action"];
   if (ownStatus === "booked") action = "booked";
   else if (ownStatus === "blocked") action = "blocked";
   else if (changePct == null) action = "hold";
+  // 競合データの無い日 (曜日・直前ルールのみの推奨) は、実際の販売価格を上げ下げする根拠にしない。
+  // 推奨価格と乖離率は参考として表示するが、値上げ/値下げの判定・アラートは出さない
+  else if (signal === "rules_only") action = "hold";
   else if (changePct >= cfg.alerts.changePct) action = "raise";
   else if (changePct <= -cfg.alerts.changePct) action = "lower";
   else action = "hold";
-  const signal: DayPricing["signal"] =
-    market.dataQuality !== "ok" ? "rules_only" : market.pace == null ? "partial" : "market";
   return {
     basePrice,
     delta,

@@ -22,9 +22,9 @@
  *                 pricing: priceDay({... premium, guard: 区分の guard ...}) }
  * 10. past = computePastDays(today, compset.members, calendar, snapshots, inputs.own, cfg)
  * 11. simulation = simulateRevenue(days, curves, cfg)
- * 12. kpis: weekdayOcc/weekendOcc = 区分別に market.occ != null の日の平均 (小数1桁)、*Days はその日数、
+ * 12. kpis: weekdayOcc/weekendOcc = 区分別に dataQuality "ok" かつ market.occ != null の日の平均 (小数1桁)、*Days はその日数、
  *     *AvgRec = 区分別の推奨価格の平均 (整数)、spikeDates = market.spike の日、
- *     raiseDays/lowerDays = 自社 vacant かつ action raise/lower の日数、past14*Occ = past の区分別 occ 平均
+ *     raiseDays/lowerDays = 自社 vacant かつ action raise/lower の日数、past14*Occ = past の区分別 occ 平均 (units >= minUnitsForSignal の日のみ)
  * 13. alerts = deriveAlerts(days, cfg)
  * 14. status:
  *     mode: dataSource "demo" → "demo"。それ以外 rules_only の日の割合 ρ で ρ == 1 → "no_market_data"、
@@ -230,8 +230,11 @@ export function computePricingDashboard(inputs: PricingInputs, now?: string): Pr
 
   // 12. KPI
   const byType = (t: NightType) => days.filter((d) => d.night.type === t);
+  // 平均占有率は有効物件数が minUnitsForSignal 以上の日 (dataQuality "ok") だけで出す
+  // (1〜2物件で算出した日を混ぜると、少数の物件の状態が「市場の占有率」に見えてしまうため)
   const occsOf = (t: NightType) =>
     byType(t)
+      .filter((d) => d.market.dataQuality === "ok")
       .map((d) => d.market.occ)
       .filter((x): x is number => x != null && Number.isFinite(x));
   const recAvg = (t: NightType) => {
@@ -244,7 +247,7 @@ export function computePricingDashboard(inputs: PricingInputs, now?: string): Pr
   const pastOcc = (t: NightType) =>
     avg(
       past
-        .filter((p) => p.night.type === t)
+        .filter((p) => p.night.type === t && p.units >= cfg.minUnitsForSignal)
         .map((p) => p.occ)
         .filter((x): x is number => x != null),
       1,

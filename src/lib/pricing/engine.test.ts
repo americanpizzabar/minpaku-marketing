@@ -358,4 +358,16 @@ describe("priceDay", () => {
     assert.equal(priceDay({ ...base, market: market({ occ: 90, dataQuality: "low" }) }).signal, "rules_only");
     assert.equal(priceDay({ ...base, market: market({ occ: 90, pace: null }) }).signal, "partial");
   });
+  it("rules_only の日は乖離が大きくても値上げ/値下げ判定をしない (本番で実価格を根拠なく下げる推奨が出た回帰)", () => {
+    for (const dataQuality of ["none", "low"] as const) {
+      const noMarket = market({ occ: null, dataQuality, units: dataQuality === "none" ? 0 : 1, pace: null });
+      const lowered = priceDay({ ...base, market: noMarket, currentPrice: 300000 });
+      assert.equal(lowered.signal, "rules_only");
+      assert.ok(lowered.changePct !== null && lowered.changePct < -10, "乖離率は参考値として残す");
+      assert.equal(lowered.action, "hold");
+      const raised = priceDay({ ...base, market: noMarket, currentPrice: 50000 });
+      assert.ok(raised.changePct !== null && raised.changePct > 10);
+      assert.equal(raised.action, "hold");
+    }
+  });
 });

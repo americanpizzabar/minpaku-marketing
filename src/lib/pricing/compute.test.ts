@@ -226,4 +226,28 @@ describe("computePricingDashboard (統合)", () => {
     assert.equal(d.status.alertChannel, "none");
     assert.ok(d.status.warnings.includes("アラートは画面表示のみで、通知先（Slack/Discord等）は未設定です"));
   });
+
+  it("新鮮なカレンダーが1物件だけ (本番の初期状態): KPI占有率は出さず、値上げ/値下げ判定・アラートも出さない", () => {
+    // 1件だけ新鮮、残りは未取得 → 全日 dataQuality low/none = rules_only
+    const candidates = Array.from({ length: 10 }, (_, i) =>
+      candidate(i, i === 0 ? {} : { ratesSyncedAt: null, lastAttemptAt: null }),
+    );
+    // 実価格 (AirROI) を推奨から大きく離して置く
+    const own = Array.from({ length: 61 }, (_, i) => ({
+      date: addDaysStr(TODAY, i),
+      apiPrice: i % 2 === 0 ? 300000 : 40000,
+      status: "vacant" as const,
+      statusSource: "api" as const,
+    }));
+    const base = buildInputs({ candidates });
+    const d = computePricingDashboard({ ...base, own, lumina: { ...base.lumina, priceSource: "api" } }, NOW);
+    assert.ok(d.days.every((x) => x.pricing.signal === "rules_only"));
+    assert.equal(d.status.mode, "no_market_data");
+    assert.equal(d.kpis.weekdayOcc, null, "1物件の状態を市場の占有率として出さない");
+    assert.equal(d.kpis.weekendOcc, null);
+    assert.equal(d.kpis.raiseDays, 0);
+    assert.equal(d.kpis.lowerDays, 0);
+    assert.ok(d.days.some((x) => x.pricing.changePct !== null), "乖離率自体は参考値として残る");
+    assert.ok(!d.alerts.some((a) => a.kind === "raise_opportunity" || a.kind === "discount_needed"));
+  });
 });

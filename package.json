@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "db:migrate": "tsx scripts/migrate.ts"
+    "db:migrate": "tsx scripts/migrate.ts",
+    "test": "node --import tsx --test src/lib/pricing/*.test.ts"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

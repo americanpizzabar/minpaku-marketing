@@ -1,9 +1,83 @@
 /**
  * 日本の祝日 (年に依存しないアルゴリズム計算) と、宿泊夜の 平日/週末 区分 (仕様 3.1)。
  *
- * 【担当: market-analytics】このファイルは契約スタブ。シグネチャを変えずに実装すること。
+ * 【担当: market-analytics】
  */
 import type { NightClass, PeakPeriod } from "./types";
+
+const pad2 = (n: number): string => String(n).padStart(2, "0");
+const ymd = (y: number, m: number, d: number): string => `${y}-${pad2(m)}-${pad2(d)}`;
+
+/** month 月の第 n 月曜日 (日付) */
+function nthMonday(year: number, month: number, n: number): number {
+  const firstDow = new Date(Date.UTC(year, month - 1, 1)).getUTCDay();
+  const firstMonday = 1 + ((8 - firstDow) % 7);
+  return firstMonday + (n - 1) * 7;
+}
+
+function dowOf(date: string): number {
+  return new Date(date + "T00:00:00Z").getUTCDay();
+}
+
+const cache = new Map<number, Map<string, string>>();
+
+/** 年ごとにメモ化した祝日表 (内部用。外へ渡すときはコピーする) */
+function holidaysOf(year: number): Map<string, string> {
+  const hit = cache.get(year);
+  if (hit) return hit;
+
+  // 国民の祝日 (法定の祝日そのもの)。2000〜2006 年等の旧制度の日付・名称も反映する
+  const base = new Map<string, string>();
+  const add = (m: number, d: number, name: string) => base.set(ymd(year, m, d), name);
+  const y = year - 1980;
+
+  add(1, 1, "元日");
+  add(1, nthMonday(year, 1, 2), "成人の日");
+  add(2, 11, "建国記念の日");
+  if (year >= 2020) add(2, 23, "天皇誕生日");
+  add(3, Math.floor(20.8431 + 0.242194 * y - Math.floor(y / 4)), "春分の日");
+  add(4, 29, year >= 2007 ? "昭和の日" : "みどりの日");
+  add(5, 3, "憲法記念日");
+  if (year >= 2007) add(5, 4, "みどりの日");
+  add(5, 5, "こどもの日");
+  if (year >= 2003) add(7, nthMonday(year, 7, 3), "海の日");
+  else add(7, 20, "海の日");
+  if (year >= 2016) add(8, 11, "山の日");
+  if (year >= 2003) add(9, nthMonday(year, 9, 3), "敬老の日");
+  else add(9, 15, "敬老の日");
+  add(9, Math.floor(23.2488 + 0.242194 * y - Math.floor(y / 4)), "秋分の日");
+  add(10, nthMonday(year, 10, 2), year >= 2020 ? "スポーツの日" : "体育の日");
+  add(11, 3, "文化の日");
+  add(11, 23, "勤労感謝の日");
+  if (year <= 2018) add(12, 23, "天皇誕生日");
+  if (year === 2019) {
+    add(5, 1, "即位の日");
+    add(10, 22, "即位礼正殿の儀");
+  }
+
+  const result = new Map(base);
+  const inYear = (d: string) => d.startsWith(`${year}-`);
+
+  // 国民の休日: 前日と翌日が国民の祝日で、それ自体は祝日でない日
+  for (const date of base.keys()) {
+    const mid = addDaysStr(date, 1);
+    if (!result.has(mid) && base.has(addDaysStr(date, 2)) && inYear(mid)) {
+      result.set(mid, "国民の休日");
+    }
+  }
+
+  // 振替休日: 国民の祝日が日曜のとき、その後の最初の「祝日でない日」
+  const sundayHolidays = [...base.keys()].filter((d) => dowOf(d) === 0).sort();
+  for (const date of sundayHolidays) {
+    let d = addDaysStr(date, 1);
+    while (result.has(d)) d = addDaysStr(d, 1);
+    if (inYear(d)) result.set(d, "振替休日");
+  }
+
+  const sorted = new Map([...result.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)));
+  cache.set(year, sorted);
+  return sorted;
+}
 
 /**
  * 指定年の国民の祝日を返す (key = "YYYY-MM-DD", value = 祝日名)。
@@ -24,26 +98,29 @@ import type { NightClass, PeakPeriod } from "./types";
  *         09-20,09-23,10-11,11-03,11-23
  */
 export function jpHolidays(year: number): Map<string, string> {
-  void year;
-  throw new Error("not implemented");
+  if (!Number.isInteger(year)) return new Map();
+  return new Map(holidaysOf(year));
 }
 
 /** その日が国民の祝日ならその名称、そうでなければ null (日曜は祝日扱いしない) */
 export function holidayName(date: string): string | null {
-  void date;
-  throw new Error("not implemented");
+  const year = Number(date.slice(0, 4));
+  if (!Number.isInteger(year)) return null;
+  return holidaysOf(year).get(date.slice(0, 10)) ?? null;
 }
 
 export function isJpHoliday(date: string): boolean {
-  void date;
-  throw new Error("not implemented");
+  return holidayName(date) !== null;
 }
 
 /** date が peakPeriods のいずれかに含まれればその名称 (start > end は年末→年始の跨ぎとして扱う) */
 export function peakPeriodOf(date: string, peakPeriods: PeakPeriod[]): string | null {
-  void date;
-  void peakPeriods;
-  throw new Error("not implemented");
+  const md = date.slice(5, 10);
+  for (const p of peakPeriods) {
+    const inRange = p.start <= p.end ? md >= p.start && md <= p.end : md >= p.start || md <= p.end;
+    if (inRange) return p.name;
+  }
+  return null;
 }
 
 /**
@@ -63,9 +140,46 @@ export function peakPeriodOf(date: string, peakPeriods: PeakPeriod[]): string | 
  *   2027-03-21(日・春分の日) weekend 祝前日（振替休日）
  */
 export function classifyNight(date: string, peakPeriods: PeakPeriod[]): NightClass {
-  void date;
-  void peakPeriods;
-  throw new Error("not implemented");
+  const dow = dowOf(date);
+  const name = holidayName(date);
+  const nextName = holidayName(addDaysStr(date, 1));
+  const peak = peakPeriodOf(date, peakPeriods);
+  const isPreHoliday = nextName !== null;
+  const isWeekend = peak !== null || isPreHoliday || dow === 5 || dow === 6;
+
+  let reason: string;
+  let tag: string;
+  if (peak !== null) {
+    reason = peak;
+    tag = "連休";
+  } else if (isPreHoliday) {
+    reason = `祝前日（${nextName}）`;
+    tag = "祝前";
+  } else if (dow === 5) {
+    reason = "金曜";
+    tag = "金";
+  } else if (dow === 6) {
+    reason = "土曜";
+    tag = "土";
+  } else if (name !== null) {
+    reason = `祝日（${name}）・翌日平日`;
+    tag = "祝";
+  } else {
+    reason = "平日";
+    tag = "";
+  }
+
+  return {
+    date,
+    type: isWeekend ? "weekend" : "weekday",
+    dow,
+    isHoliday: name !== null,
+    holidayName: name,
+    isPreHoliday,
+    peakPeriod: peak,
+    reason,
+    tag,
+  };
 }
 
 /** "YYYY-MM-DD" に n 日加算 (UTC 計算。タイムゾーンに依存しない) */

@@ -1,3 +1,4 @@
+import { isJpHoliday } from "./pricing/holidays";
 import type { DayType, TimeRange } from "./types";
 
 export function toDateStr(d: Date): string {
@@ -33,16 +34,9 @@ export function rangeForTimeRange(range: TimeRange): { start: string; end: strin
   }
 }
 
-// 2026年の主な日本の祝日 (簡易リスト)
-const JP_HOLIDAYS_2026 = new Set([
-  "2026-01-01", "2026-01-12", "2026-02-11", "2026-02-23", "2026-03-20",
-  "2026-04-29", "2026-05-03", "2026-05-04", "2026-05-05", "2026-05-06",
-  "2026-07-20", "2026-08-11", "2026-09-21", "2026-09-22", "2026-09-23",
-  "2026-10-12", "2026-11-03", "2026-11-23", "2026-12-31",
-]);
-
+/** 国民の祝日 (振替休日・国民の休日を含む。年に依存しない計算) または日曜 */
 export function isHoliday(dateStr: string): boolean {
-  return JP_HOLIDAYS_2026.has(dateStr) || new Date(dateStr + "T00:00:00Z").getUTCDay() === 0;
+  return isJpHoliday(dateStr) || new Date(dateStr + "T00:00:00Z").getUTCDay() === 0;
 }
 
 export function matchesDayType(dateStr: string, dayType: DayType): boolean {

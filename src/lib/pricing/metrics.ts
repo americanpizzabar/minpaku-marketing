@@ -2,7 +2,7 @@
  * 稼働進捗の指標化 (仕様 3.2): 競合占有率 Occ_t / 競合平均販売価格 CompADR_t / Pace Index PI_t、
  * 予約曲線 (平日・週末別のリードタイム別 予約確定タイミング)、直近14日の実績。
  *
- * 【担当: market-analytics】このファイルは契約スタブ。シグネチャを変えずに実装すること。
+ * 【担当: market-analytics】
  *
  * ■ 共通: ブロック補正 (有効競合総室数)
  * AirROI の将来カレンダーは「予約済」と「ホストのブロック」を区別できない (どちらも available=false)。
@@ -17,26 +17,126 @@
  *   age <= freshnessDays かつ age <= max(compsetRefreshDays + 1, floor(L / 2))
  * のときのみ有効 (直前の日ほど新しい観測を要求する。10日前の観測で明日の需給を判断しない)。
  */
+import { addDaysStr, classifyNight, diffDays } from "./holidays";
 import type {
   BookingCurve,
+  BookingCurvePoint,
   CalendarRow,
   CompSetMember,
   MarketDay,
+  MarketListingState,
   NightClass,
+  NightType,
   OwnDay,
   PastDay,
   PricingConfig,
   SnapshotRow,
 } from "./types";
 
+/* ------------------------------------------------------------------ */
+/* 小道具                                                               */
+/* ------------------------------------------------------------------ */
+
+// "+ 0" で -0 を 0 にそろえる
+const round1 = (x: number): number => Math.round(x * 10) / 10 + 0;
+const round2 = (x: number): number => Math.round(x * 100) / 100 + 0;
+
+/** ブロック補正: 予約可能 → (b=0, e=1)、予約不可 → (b=r, e=r) */
+function blockAdjusted(available: boolean, r: number): { b: number; e: number } {
+  return available ? { b: 0, e: 1 } : { b: r, e: r };
+}
+
+function shareOf(r: Map<string, number>, id: string): number {
+  return r.get(id) ?? 1;
+}
+
+function median(sorted: number[]): number {
+  const n = sorted.length;
+  const mid = Math.floor(n / 2);
+  return n % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function nightTypeResolver(nights: Map<string, NightClass> | null, config: PricingConfig): (d: string) => NightType {
+  const memo = new Map<string, NightType>();
+  return (d) => {
+    const n = nights?.get(d);
+    if (n) return n.type;
+    let t = memo.get(d);
+    if (t === undefined) {
+      t = classifyNight(d, config.peakPeriods).type;
+      memo.set(d, t);
+    }
+    return t;
+  };
+}
+
+/** member ごとのスナップショット: snapshotDate → (宿泊日 → 行)、および snapshotDate の昇順リスト */
+interface MemberSnapshots {
+  byDate: Map<string, Map<string, SnapshotRow>>;
+  dates: string[];
+}
+
+function indexSnapshots(members: CompSetMember[], snapshots: SnapshotRow[]): Map<string, MemberSnapshots> {
+  const ids = new Set(members.map((m) => m.id));
+  const out = new Map<string, MemberSnapshots>();
+  for (const s of snapshots) {
+    if (!ids.has(s.propertyId)) continue;
+    let ms = out.get(s.propertyId);
+    if (!ms) {
+      ms = { byDate: new Map(), dates: [] };
+      out.set(s.propertyId, ms);
+    }
+    let rows = ms.byDate.get(s.snapshotDate);
+    if (!rows) {
+      rows = new Map();
+      ms.byDate.set(s.snapshotDate, rows);
+    }
+    rows.set(s.date, s);
+  }
+  for (const ms of out.values()) ms.dates = [...ms.byDate.keys()].sort();
+  return out;
+}
+
+/** 候補日 list の中で target に最も近い日 (同距離なら古い方)。無ければ null */
+function closestDate(list: string[], target: string): string | null {
+  let best: string | null = null;
+  let bestDist = Infinity;
+  for (const s of list) {
+    const dist = Math.abs(diffDays(target, s));
+    if (dist < bestDist || (dist === bestDist && best !== null && s < best)) {
+      best = s;
+      bestDist = dist;
+    }
+  }
+  return best;
+}
+
+/* ------------------------------------------------------------------ */
+/* ブロック補正・統計量                                                 */
+/* ------------------------------------------------------------------ */
+
 /**
  * member id → r_i。reservedShare を [0.05, 1] にクランプ。null の物件は「members の非 null 値の中央値」
  * (それも無ければ 1)。config.blockAdjust=false のときは全員 1。
  */
 export function reservedShareFor(members: CompSetMember[], config: PricingConfig): Map<string, number> {
-  void members;
-  void config;
-  throw new Error("not implemented");
+  const out = new Map<string, number>();
+  if (!config.blockAdjust) {
+    for (const m of members) out.set(m.id, 1);
+    return out;
+  }
+  const clamp = (v: number) => Math.min(1, Math.max(0.05, v));
+  const known = members
+    .map((m) => m.reservedShare)
+    .filter((v): v is number => v !== null && Number.isFinite(v))
+    .map(clamp)
+    .sort((a, b) => a - b);
+  const fallback = known.length > 0 ? median(known) : 1;
+  for (const m of members) {
+    const v = m.reservedShare;
+    out.set(m.id, v !== null && Number.isFinite(v) ? clamp(v) : fallback);
+  }
+  return out;
 }
 
 /**
@@ -46,10 +146,22 @@ export function reservedShareFor(members: CompSetMember[], config: PricingConfig
  * 空なら null。四捨五入して整数円。
  */
 export function centralPrice(prices: number[], stat: "median" | "trimmed"): number | null {
-  void prices;
-  void stat;
-  throw new Error("not implemented");
+  const xs = prices.filter((p) => Number.isFinite(p) && p > 0).sort((a, b) => a - b);
+  const n = xs.length;
+  if (n === 0) return null;
+  if (stat === "trimmed" && n >= 3) {
+    const g = Math.max(1, Math.floor(n * 0.1));
+    if (n - 2 * g >= 1) {
+      const kept = xs.slice(g, n - g);
+      return Math.round(kept.reduce((s, v) => s + v, 0) / kept.length);
+    }
+  }
+  return Math.round(median(xs));
 }
+
+/* ------------------------------------------------------------------ */
+/* 将来日の市場指標                                                     */
+/* ------------------------------------------------------------------ */
 
 /**
  * 将来日 dates (lead 0..horizon) ごとの市場指標を計算する (pace 系は null, spike=false で返す)。
@@ -80,14 +192,160 @@ export function computeMarketDays(
   config: PricingConfig,
   today: string,
 ): Map<string, MarketDay> {
-  void dates;
-  void nights;
-  void members;
-  void calendar;
-  void config;
-  void today;
-  throw new Error("not implemented");
+  const r = reservedShareFor(members, config);
+  const typeOf = nightTypeResolver(nights, config);
+  const ids = new Set(members.map((m) => m.id));
+  const orderedMembers = [...members].sort((a, b) => a.distanceKm - b.distanceKm);
+
+  // 宿泊日 → (物件 → 行)。同じ (物件, 日) が複数あれば取得日の新しい方
+  const idx = new Map<string, Map<string, CalendarRow>>();
+  for (const row of calendar) {
+    if (!ids.has(row.propertyId)) continue;
+    let m = idx.get(row.date);
+    if (!m) {
+      m = new Map();
+      idx.set(row.date, m);
+    }
+    const prev = m.get(row.propertyId);
+    if (!prev || row.fetchedAt > prev.fetchedAt) m.set(row.propertyId, row);
+  }
+
+  interface Agg {
+    date: string;
+    lead: number;
+    type: NightType;
+    units: number;
+    unavailable: number;
+    eb: number;
+    eu: number;
+    remaining: number;
+    prices: number[];
+    maxAge: number | null;
+    listings: MarketListingState[];
+  }
+
+  const uniqueDates = [...new Set(dates)];
+  const aggs: Agg[] = uniqueDates.map((date) => {
+    const lead = diffDays(today, date);
+    const ageLimit = Math.min(config.freshnessDays, Math.max(config.compsetRefreshDays + 1, Math.floor(lead / 2)));
+    const rows = idx.get(date);
+    const a: Agg = {
+      date,
+      lead,
+      type: typeOf(date),
+      units: 0,
+      unavailable: 0,
+      eb: 0,
+      eu: 0,
+      remaining: 0,
+      prices: [],
+      maxAge: null,
+      listings: [],
+    };
+    if (!rows) return a;
+    for (const m of orderedMembers) {
+      const row = rows.get(m.id);
+      if (!row) continue;
+      const age = diffDays(row.fetchedAt, today);
+      if (age > ageLimit) continue;
+      const { b, e } = blockAdjusted(row.available, shareOf(r, m.id));
+      a.units += 1;
+      a.eb += b;
+      a.eu += e;
+      if (row.available) {
+        a.remaining += 1;
+        if (Number.isFinite(row.price) && row.price > 0) a.prices.push(row.price);
+      } else {
+        a.unavailable += 1;
+      }
+      a.maxAge = a.maxAge === null ? age : Math.max(a.maxAge, age);
+      a.listings.push({
+        id: m.id,
+        available: row.available,
+        price: row.available && Number.isFinite(row.price) && row.price > 0 ? row.price : null,
+      });
+    }
+    return a;
+  });
+
+  const H = config.horizonDays;
+  const k = config.shrinkStrength;
+  const poolSum = (self: number, pred: (o: Agg) => boolean) => {
+    let b = 0;
+    let e = 0;
+    aggs.forEach((o, j) => {
+      if (j === self || o.type !== aggs[self].type || !pred(o)) return;
+      b += o.eb;
+      e += o.eu;
+    });
+    return { b, e };
+  };
+
+  const out = new Map<string, MarketDay>();
+  aggs.forEach((a, i) => {
+    const hasData = a.units > 0 && a.eu > 0;
+    let occRaw: number | null = null;
+    let occAdj: number | null = null;
+    let occ: number | null = null;
+    let occCi: [number, number] | null = null;
+
+    if (hasData) {
+      const adj = a.eb / a.eu;
+      const w = Math.max(2, Math.min(7, a.lead, H - a.lead));
+      let pool = poolSum(i, (o) => Math.abs(o.lead - a.lead) <= w);
+      if (pool.e < 1) pool = poolSum(i, (o) => Math.abs(o.lead - a.lead) <= 7);
+      if (pool.e < 1) pool = poolSum(i, () => true);
+      const prior = pool.e > 0 ? pool.b / pool.e : adj;
+
+      occRaw = round1((a.unavailable / a.units) * 100);
+      occAdj = round1(adj * 100);
+      occ = round1(((a.eb + k * prior) / (a.eu + k)) * 100);
+
+      const alpha = a.eb + k * prior + 0.5;
+      const beta = a.eu - a.eb + k * (1 - prior) + 0.5;
+      const s = alpha + beta;
+      const mean = alpha / s;
+      const sd = Math.sqrt((alpha * beta) / (s * s * (s + 1)));
+      const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
+      occCi = [round1(clamp01(mean - 1.2816 * sd) * 100), round1(clamp01(mean + 1.2816 * sd) * 100)];
+    }
+
+    const dataQuality: MarketDay["dataQuality"] = !hasData
+      ? "none"
+      : a.units >= config.minUnitsForSignal
+        ? "ok"
+        : "low";
+
+    out.set(a.date, {
+      units: a.units,
+      unavailable: a.unavailable,
+      expectedBooked: round2(a.eb),
+      effectiveUnits: round2(a.eu),
+      occRaw,
+      occAdj,
+      occ,
+      occCi,
+      remaining: a.remaining,
+      remainingEst: a.units > 0 ? Math.round((a.remaining * members.length) / a.units) : null,
+      compAdr: centralPrice(a.prices, config.adrStat),
+      priceCount: a.prices.length,
+      maxAgeDays: a.maxAge,
+      listings: a.listings,
+      pace: null,
+      paceRaw: null,
+      paceExpected: null,
+      paceDays: null,
+      newBookings: null,
+      spike: false,
+      dataQuality,
+    });
+  });
+  return out;
 }
+
+/* ------------------------------------------------------------------ */
+/* Pace                                                                 */
+/* ------------------------------------------------------------------ */
 
 export interface PaceResult {
   byDate: Map<
@@ -104,6 +362,19 @@ export interface PaceResult {
   paceCompareDate: string | null; // 採用した C_p の最頻値 (同数なら新しい方)
   paceWindowDays: number | null; // 採用した (S_p − C_p) の平均 (小数1桁)
   paceAvailableFrom: string | null; // byDate に pace 非 null が1つも無いとき: (S_p が存在する member の最小 S_p) + 3日。それ以外 null
+}
+
+/** fitted (lead 昇順) を lead → occ/100 の関数にする。lead が無い所は最も近い lead (同距離なら小さい lead) */
+function curveFn(fitted: { lead: number; occ: number }[]): ((lead: number) => number) | null {
+  if (fitted.length === 0) return null;
+  const pts = [...fitted].sort((a, b) => a.lead - b.lead);
+  return (lead) => {
+    let best = pts[0];
+    for (const p of pts) {
+      if (Math.abs(p.lead - lead) < Math.abs(best.lead - lead)) best = p;
+    }
+    return best.occ / 100;
+  };
 }
 
 /**
@@ -133,14 +404,128 @@ export function computePace(
   config: PricingConfig,
   today: string,
 ): PaceResult {
-  void dates;
-  void nights;
-  void members;
-  void snapshots;
-  void curves;
-  void config;
-  void today;
-  throw new Error("not implemented");
+  const r = reservedShareFor(members, config);
+  const typeOf = nightTypeResolver(nights, config);
+  const snaps = indexSnapshots(members, snapshots);
+  const F: Record<NightType, ((lead: number) => number) | null> = {
+    weekday: curveFn(curves.weekday.fitted),
+    weekend: curveFn(curves.weekend.fitted),
+  };
+
+  // 最新スナップショット日 (ペア有無に関係なく)
+  const freshFrom = addDaysStr(today, -config.freshnessDays);
+  let lastSnapshotDate: string | null = null;
+  for (const ms of snaps.values()) {
+    for (const s of ms.dates) {
+      if (s >= freshFrom && s <= today && (lastSnapshotDate === null || s > lastSnapshotDate)) lastSnapshotDate = s;
+    }
+  }
+
+  // 物件ごとの比較ペア (S_p, C_p)
+  const sFrom = addDaysStr(today, -(config.compsetRefreshDays + 1));
+  interface Pair {
+    id: string;
+    S: string;
+    C: string;
+    g: number;
+    rowsS: Map<string, SnapshotRow>;
+    rowsC: Map<string, SnapshotRow>;
+  }
+  const pairs: Pair[] = [];
+  const sDates: string[] = [];
+  for (const m of members) {
+    const ms = snaps.get(m.id);
+    if (!ms) continue;
+    const inS = ms.dates.filter((s) => s >= sFrom && s <= today);
+    if (inS.length === 0) continue;
+    const S = inS[inS.length - 1];
+    sDates.push(S);
+    const cLo = addDaysStr(S, -7);
+    const cHi = addDaysStr(S, -3);
+    const C = closestDate(
+      ms.dates.filter((s) => s >= cLo && s <= cHi),
+      addDaysStr(S, -7),
+    );
+    if (C === null) continue;
+    pairs.push({
+      id: m.id,
+      S,
+      C,
+      g: diffDays(C, S),
+      rowsS: ms.byDate.get(S) ?? new Map(),
+      rowsC: ms.byDate.get(C) ?? new Map(),
+    });
+  }
+
+  const byDate: PaceResult["byDate"] = new Map();
+  const used = new Set<string>();
+  const empty = { pace: null, paceRaw: null, paceExpected: null, paceDays: null, newBookings: null };
+
+  for (const d of new Set(dates)) {
+    const type = typeOf(d);
+    const P = pairs.filter((p) => p.rowsS.has(d) && p.rowsC.has(d) && diffDays(p.S, d) >= 0);
+    if (P.length < config.minUnitsForSignal || P.length === 0) {
+      byDate.set(d, { ...empty });
+      continue;
+    }
+    const f = F[type];
+    let sumE = 0;
+    let rawNum = 0;
+    let expNum = 0;
+    let gSum = 0;
+    let newBookings = 0;
+    for (const p of P) {
+      const share = shareOf(r, p.id);
+      const rs = p.rowsS.get(d) as SnapshotRow;
+      const rc = p.rowsC.get(d) as SnapshotRow;
+      const s = blockAdjusted(rs.available, share);
+      const c = blockAdjusted(rc.available, share);
+      sumE += s.e;
+      rawNum += (s.b - c.b) / p.g;
+      if (f) expNum += (s.e * (f(diffDays(p.S, d)) - f(diffDays(p.C, d)))) / p.g;
+      gSum += p.g;
+      if (rc.available && !rs.available) newBookings += 1;
+      used.add(p.id);
+    }
+    if (!(sumE > 0)) {
+      byDate.set(d, { ...empty });
+      continue;
+    }
+    const raw = (100 * 7 * rawNum) / sumE;
+    const exp = f ? (100 * 7 * expNum) / sumE : null;
+    byDate.set(d, {
+      pace: exp === null ? null : round1(raw - exp),
+      paceRaw: round1(raw),
+      paceExpected: exp === null ? null : round1(exp),
+      paceDays: round1(gSum / P.length),
+      newBookings,
+    });
+  }
+
+  // 実際に比較に使った物件のペアから代表値を出す
+  const usedPairs = pairs.filter((p) => used.has(p.id));
+  let paceCompareDate: string | null = null;
+  let paceWindowDays: number | null = null;
+  if (usedPairs.length > 0) {
+    const counts = new Map<string, number>();
+    for (const p of usedPairs) counts.set(p.C, (counts.get(p.C) ?? 0) + 1);
+    let bestCount = -1;
+    for (const [c, n] of counts) {
+      if (n > bestCount || (n === bestCount && paceCompareDate !== null && c > paceCompareDate)) {
+        paceCompareDate = c;
+        bestCount = n;
+      }
+    }
+    paceWindowDays = round1(usedPairs.reduce((s, p) => s + p.g, 0) / usedPairs.length);
+  }
+
+  const anyPace = [...byDate.values()].some((v) => v.pace !== null);
+  let paceAvailableFrom: string | null = null;
+  if (!anyPace && sDates.length > 0) {
+    paceAvailableFrom = addDaysStr(sDates.sort()[0], 3);
+  }
+
+  return { byDate, lastSnapshotDate, paceCompareDate, paceWindowDays, paceAvailableFrom };
 }
 
 /**
@@ -148,11 +533,23 @@ export function computePace(
  * spike = pace != null && pace >= config.spike.minPt && (newBookings ?? 0) >= config.spike.minNewBookings
  */
 export function applyPace(market: Map<string, MarketDay>, pace: PaceResult, config: PricingConfig): void {
-  void market;
-  void pace;
-  void config;
-  throw new Error("not implemented");
+  for (const [d, m] of market) {
+    const p = pace.byDate.get(d);
+    if (p) {
+      m.pace = p.pace;
+      m.paceRaw = p.paceRaw;
+      m.paceExpected = p.paceExpected;
+      m.paceDays = p.paceDays;
+      m.newBookings = p.newBookings;
+    }
+    m.spike =
+      m.pace !== null && m.pace >= config.spike.minPt && (m.newBookings ?? 0) >= config.spike.minNewBookings;
+  }
 }
+
+/* ------------------------------------------------------------------ */
+/* 予約曲線                                                             */
+/* ------------------------------------------------------------------ */
 
 /**
  * 重み付き Pool-Adjacent-Violators による「x に対して単調非増加」な回帰。
@@ -160,8 +557,122 @@ export function applyPace(market: Map<string, MarketDay>, pace: PaceResult, conf
  * 出力は x 昇順、各 x に当てはめ値 y。空入力は空配列。
  */
 export function isotonicNonIncreasing(points: { x: number; y: number; w: number }[]): { x: number; y: number }[] {
-  void points;
-  throw new Error("not implemented");
+  const byX = new Map<number, { sw: number; swy: number }>();
+  for (const p of points) {
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.w) || p.w <= 0) continue;
+    const g = byX.get(p.x) ?? { sw: 0, swy: 0 };
+    g.sw += p.w;
+    g.swy += p.w * p.y;
+    byX.set(p.x, g);
+  }
+  const xs = [...byX.keys()].sort((a, b) => a - b);
+  if (xs.length === 0) return [];
+
+  // ブロック = { 重み, 加重平均, 含む x の個数 }
+  const blocks: { w: number; y: number; n: number }[] = [];
+  for (const x of xs) {
+    const g = byX.get(x) as { sw: number; swy: number };
+    blocks.push({ w: g.sw, y: g.swy / g.sw, n: 1 });
+    // 非増加の違反 (前のブロックより大きい) を併合
+    while (blocks.length >= 2 && blocks[blocks.length - 2].y < blocks[blocks.length - 1].y) {
+      const last = blocks.pop() as { w: number; y: number; n: number };
+      const prev = blocks[blocks.length - 1];
+      const w = prev.w + last.w;
+      prev.y = (prev.y * prev.w + last.y * last.w) / w;
+      prev.w = w;
+      prev.n += last.n;
+    }
+  }
+  const out: { x: number; y: number }[] = [];
+  let i = 0;
+  for (const b of blocks) {
+    for (let j = 0; j < b.n; j++) out.push({ x: xs[i++], y: b.y });
+  }
+  return out;
+}
+
+interface CurveObs {
+  date: string;
+  lead: number;
+  b: number;
+  e: number;
+  current: boolean;
+}
+
+function emptyCurve(type: NightType): BookingCurve {
+  return { type, points: [], fitted: [], reach50: null, reach80: null, sampleSize: 0 };
+}
+
+function reachLead(fitted: { lead: number; occ: number }[], threshold: number): number | null {
+  if (fitted.length === 0 || fitted[0].occ < threshold) return null;
+  let best: number | null = null;
+  for (const f of fitted) if (f.occ >= threshold) best = f.lead;
+  return best;
+}
+
+function buildCurve(type: NightType, obs: CurveObs[], config: PricingConfig): BookingCurve {
+  if (obs.length === 0) return emptyCurve(type);
+  const H = config.horizonDays;
+
+  // 散布図: (宿泊日, 3日刻みの lead) ごとに1点
+  const groups = new Map<string, { date: string; lead: number; b: number; e: number; n: number; current: boolean }>();
+  for (const o of obs) {
+    const l3 = 3 * Math.round(o.lead / 3);
+    const key = `${o.date}|${l3}`;
+    const g = groups.get(key) ?? { date: o.date, lead: l3, b: 0, e: 0, n: 0, current: false };
+    g.b += o.b;
+    g.e += o.e;
+    g.n += 1;
+    g.current = g.current || o.current;
+    groups.set(key, g);
+  }
+  const allPoints: BookingCurvePoint[] = [...groups.values()]
+    .filter((g) => g.n >= config.minUnitsForSignal && g.e > 0)
+    .map((g) => ({
+      lead: g.lead,
+      occ: round1((g.b / g.e) * 100),
+      date: g.date,
+      source: g.current ? ("current" as const) : ("snapshot" as const),
+    }))
+    .sort((a, b) => a.lead - b.lead || (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  const MAX_POINTS = 400;
+  const points =
+    allPoints.length <= MAX_POINTS
+      ? allPoints
+      : Array.from({ length: MAX_POINTS }, (_, i) => allPoints[Math.floor((i * allPoints.length) / MAX_POINTS)]);
+
+  // 平均予約曲線: lead ±2 日をプールした Σb/Σe を単調化
+  const sumB = new Array<number>(H + 1).fill(0);
+  const sumE = new Array<number>(H + 1).fill(0);
+  const cnt = new Array<number>(H + 1).fill(0);
+  for (const o of obs) {
+    if (o.lead < 0 || o.lead > H) continue;
+    sumB[o.lead] += o.b;
+    sumE[o.lead] += o.e;
+    cnt[o.lead] += 1;
+  }
+  const raw: { x: number; y: number; w: number }[] = [];
+  for (let L = 0; L <= H; L++) {
+    let b = 0;
+    let e = 0;
+    let n = 0;
+    for (let j = Math.max(0, L - 2); j <= Math.min(H, L + 2); j++) {
+      b += sumB[j];
+      e += sumE[j];
+      n += cnt[j];
+    }
+    if (n > 0 && e > 0) raw.push({ x: L, y: (b / e) * 100, w: e });
+  }
+  const fitted = isotonicNonIncreasing(raw).map((p) => ({ lead: p.x, occ: round1(p.y) }));
+
+  return {
+    type,
+    points,
+    fitted,
+    reach50: reachLead(fitted, 50),
+    reach80: reachLead(fitted, 80),
+    sampleSize: allPoints.length,
+  };
 }
 
 /**
@@ -186,13 +697,56 @@ export function buildBookingCurves(
   config: PricingConfig,
   today: string,
 ): { weekday: BookingCurve; weekend: BookingCurve } {
-  void members;
-  void snapshots;
-  void market;
-  void config;
-  void today;
-  throw new Error("not implemented");
+  const r = reservedShareFor(members, config);
+  const ids = new Set(members.map((m) => m.id));
+  const typeOf = nightTypeResolver(null, config);
+  const H = config.horizonDays;
+  const obs: Record<NightType, CurveObs[]> = { weekday: [], weekend: [] };
+
+  // (2) 現在の市場
+  const currentKeys = new Set<string>();
+  for (const [d, md] of market) {
+    const lead = diffDays(today, d);
+    if (lead < 0 || lead > H) continue;
+    for (const l of md.listings) {
+      const key = `${l.id}|${d}`;
+      if (currentKeys.has(key)) continue;
+      currentKeys.add(key);
+      const { b, e } = blockAdjusted(l.available, shareOf(r, l.id));
+      obs[typeOf(d)].push({ date: d, lead, b, e, current: true });
+    }
+  }
+
+  // (1) スナップショット (物件の最新スナップショット日で現在の市場と重なる (p, d) は除く)
+  const latestSnap = new Map<string, string>();
+  for (const s of snapshots) {
+    if (!ids.has(s.propertyId)) continue;
+    const prev = latestSnap.get(s.propertyId);
+    if (prev === undefined || s.snapshotDate > prev) latestSnap.set(s.propertyId, s.snapshotDate);
+  }
+  const seen = new Set<string>();
+  for (const s of snapshots) {
+    if (!ids.has(s.propertyId)) continue;
+    const lead = diffDays(s.snapshotDate, s.date);
+    if (lead < 0 || lead > H) continue;
+    const key = `${s.propertyId}|${s.date}`;
+    if (latestSnap.get(s.propertyId) === s.snapshotDate && currentKeys.has(key)) continue;
+    const rowKey = `${s.snapshotDate}|${key}`;
+    if (seen.has(rowKey)) continue;
+    seen.add(rowKey);
+    const { b, e } = blockAdjusted(s.available, shareOf(r, s.propertyId));
+    obs[typeOf(s.date)].push({ date: s.date, lead, b, e, current: false });
+  }
+
+  return {
+    weekday: buildCurve("weekday", obs.weekday, config),
+    weekend: buildCurve("weekend", obs.weekend, config),
+  };
 }
+
+/* ------------------------------------------------------------------ */
+/* 直近14日の実績                                                       */
+/* ------------------------------------------------------------------ */
 
 /**
  * 直近実績 (仕様 3.1: 過去14日間)。d = today−14 … today−1 (古い順) について
@@ -212,11 +766,88 @@ export function computePastDays(
   own: OwnDay[],
   config: PricingConfig,
 ): PastDay[] {
-  void today;
-  void members;
-  void calendar;
-  void snapshots;
-  void own;
-  void config;
-  throw new Error("not implemented");
+  const r = reservedShareFor(members, config);
+  const ids = new Set(members.map((m) => m.id));
+  const snaps = indexSnapshots(members, snapshots);
+  const ownByDate = new Map(own.map((o) => [o.date, o]));
+
+  // 宿泊日 → (物件 → 行の一覧)
+  const cal = new Map<string, Map<string, CalendarRow[]>>();
+  for (const row of calendar) {
+    if (!ids.has(row.propertyId)) continue;
+    let m = cal.get(row.date);
+    if (!m) {
+      m = new Map();
+      cal.set(row.date, m);
+    }
+    const list = m.get(row.propertyId) ?? [];
+    list.push(row);
+    m.set(row.propertyId, list);
+  }
+
+  const out: PastDay[] = [];
+  for (let i = 14; i >= 1; i--) {
+    const d = addDaysStr(today, -i);
+    const from = addDaysStr(d, -config.freshnessDays);
+
+    // 実績占有率・競合価格
+    let units = 0;
+    let eb = 0;
+    let eu = 0;
+    const prices: number[] = [];
+    for (const [pid, rows] of cal.get(d) ?? new Map<string, CalendarRow[]>()) {
+      let best: CalendarRow | null = null;
+      for (const row of rows) {
+        if (row.fetchedAt < from || row.fetchedAt > d) continue;
+        if (!best || row.fetchedAt > best.fetchedAt) best = row;
+      }
+      if (!best) continue;
+      const { b, e } = blockAdjusted(best.available, shareOf(r, pid));
+      units += 1;
+      eb += b;
+      eu += e;
+      if (best.available && Number.isFinite(best.price) && best.price > 0) prices.push(best.price);
+    }
+
+    // pickup7: 最後の約7日間の積み増し
+    let b1 = 0;
+    let e1 = 0;
+    let b0 = 0;
+    let e0 = 0;
+    let paired = 0;
+    for (const [pid, ms] of snaps) {
+      const withRow = ms.dates.filter((s) => s <= d && ms.byDate.get(s)?.has(d));
+      if (withRow.length === 0) continue;
+      const s1 = withRow[withRow.length - 1];
+      const lo = addDaysStr(s1, -10);
+      const hi = addDaysStr(s1, -4);
+      const s0 = closestDate(
+        withRow.filter((s) => s >= lo && s <= hi),
+        addDaysStr(s1, -7),
+      );
+      if (s0 === null) continue;
+      const share = shareOf(r, pid);
+      const x1 = blockAdjusted((ms.byDate.get(s1)?.get(d) as SnapshotRow).available, share);
+      const x0 = blockAdjusted((ms.byDate.get(s0)?.get(d) as SnapshotRow).available, share);
+      b1 += x1.b;
+      e1 += x1.e;
+      b0 += x0.b;
+      e0 += x0.e;
+      paired += 1;
+    }
+    const pickup7 =
+      paired >= config.minUnitsForSignal && paired > 0 && e1 > 0 && e0 > 0 ? round1((b1 / e1 - b0 / e0) * 100) : null;
+
+    const o = ownByDate.get(d);
+    out.push({
+      date: d,
+      night: classifyNight(d, config.peakPeriods),
+      occ: units > 0 && eu > 0 ? round1((eb / eu) * 100) : null,
+      compAdr: units > 0 ? centralPrice(prices, config.adrStat) : null,
+      units,
+      pickup7,
+      own: { status: o?.status ?? "vacant", currentPrice: o?.apiPrice ?? null },
+    });
+  }
+  return out;
 }

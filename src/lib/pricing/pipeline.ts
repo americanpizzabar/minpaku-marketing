@@ -3,7 +3,7 @@
  *   データ取得 (CompSet カレンダー) → 差分検知 (スナップショットで Pace) → リコメンド生成 (保存) → アラート通知
  */
 import type { Client, InStatement, InValue } from "@libsql/client";
-import { refreshRatesForProperty } from "../airroi";
+import { isAirRoiConfigured, refreshRatesForProperty } from "../airroi";
 import { toDateStr, todayJst } from "../dates";
 import { COST_PER_RATES_CALL, getSyncConfig } from "../sync-config";
 import { computePricingDashboard } from "./compute";
@@ -72,6 +72,17 @@ export async function refreshCompsetCalendars(
     limit: MAX_CALLS_PER_RUN,
   });
   if (eligible.length === 0) return { refreshed: 0, costUsd: 0, skipped: 0 };
+  if (!isAirRoiConfigured()) {
+    // キー未設定で呼ぶと全件「取得失敗」として取得試行日だけが進み、CompSet が failed 扱いになってしまう
+    await db
+      .execute({
+        sql: `INSERT INTO sync_logs (sync_type, records_fetched, api_calls_count, status, error_message)
+              VALUES ('pricing_compset', 0, 0, 'FAILED', 'AIRROI_API_KEY が設定されていません')`,
+        args: [],
+      })
+      .catch(() => {});
+    return { refreshed: 0, costUsd: 0, skipped: eligible.length };
+  }
 
   const counterKey = `${REFRESH_COUNTER_PREFIX}${today}`;
   const counterRes = await db.execute({
@@ -92,6 +103,7 @@ export async function refreshCompsetCalendars(
 
   let refreshed = 0;
   let records = 0;
+  let failed = 0; // 取得できなかった件数 (refreshRatesForProperty は取得失敗を内部で握りつぶし 0 件を返す)
   let errorMessage: string | null = null;
   if (planned.length > 0) {
     // 並行実行でも上限を超えないよう、先に予定件数を計上しておく (終了後に実数へ補正)
@@ -115,8 +127,13 @@ export async function refreshCompsetCalendars(
         // 取得の成否に関係なく API は呼ばれている (費用は発生) ので件数に含める
         refreshed += batch.length;
         for (const r of results) {
-          if (r.status === "fulfilled") records += r.value;
-          else errorMessage = r.reason instanceof Error ? r.reason.message : String(r.reason);
+          if (r.status === "fulfilled") {
+            records += r.value;
+            if (r.value === 0) failed += 1;
+          } else {
+            failed += 1;
+            errorMessage = r.reason instanceof Error ? r.reason.message : String(r.reason);
+          }
         }
       }
     } finally {
@@ -125,10 +142,12 @@ export async function refreshCompsetCalendars(
   }
 
   const skipped = eligible.length - refreshed;
-  const status = errorMessage && records === 0 ? "FAILED" : skipped > 0 ? "PARTIAL" : "SUCCESS";
-  const message =
-    errorMessage ??
-    (skipped > 0 ? `CompSetカレンダー: ${skipped}件は上限 (1回${limit}件 / 1日${dailyCap}件) のため取得しませんでした` : null);
+  const status =
+    refreshed > 0 && failed >= refreshed ? "FAILED" : skipped > 0 || failed > 0 ? "PARTIAL" : "SUCCESS";
+  const notes: string[] = [];
+  if (failed > 0) notes.push(`${failed}件は取得できませんでした${errorMessage ? ` (${errorMessage})` : ""}`);
+  if (skipped > 0) notes.push(`${skipped}件は上限 (1回${limit}件 / 1日${dailyCap}件) のため取得しませんでした`);
+  const message = notes.length > 0 ? `CompSetカレンダー: ${notes.join("、")}` : null;
   await db
     .execute({
       sql: `INSERT INTO sync_logs (sync_type, records_fetched, api_calls_count, status, error_message)
@@ -199,7 +218,7 @@ function recommendationStmt(today: string, d: DayRecommendation): InStatement {
 /**
  * 今日の推奨価格を保存し、アラートを記録・通知する。API 費用は発生しない (CompSet 取得は呼び出し側で)。
  * 1. (config.icalUrl があれば) importIcalToDb を試行 (失敗しても続行。結果は ical.ts が記録)
- * 2. dashboard = computePricingDashboard(await loadPricingInputs())。dataSource "demo" なら保存せず返す
+ * 2. dashboard = computePricingDashboard(await loadPricingInputs(db))。db が null (= dataSource "demo") なら保存せず返す
  * 3. pricing_recommendations に generated_date = today で days を UPSERT (列は docs/pricing-module.md のスキーマ)
  * 4. pricing_alerts: 今回の alerts を INSERT … ON CONFLICT(generated_date, target_date, kind)
  *    DO UPDATE SET severity, message (未通知の行のみ更新)。その後、generated_date = today かつ notified_at IS NULL で
@@ -213,22 +232,24 @@ function recommendationStmt(today: string, d: DayRecommendation): InStatement {
  * 戻り値: saved = 保存した推奨行数, alerts = 今回のアラート件数, notified = 通知した件数
  */
 export async function runPricingPipeline(
-  db: Client,
+  db: Client | null,
   opts: { notify: boolean },
 ): Promise<{ saved: number; alerts: number; notified: number; dashboard: PricingDashboard }> {
   // 1. 自社カレンダー (iCal) の取り込み
-  const config = await getPricingConfig(db);
-  if (config.icalUrl) {
-    try {
-      await importIcalToDb(db, config.icalUrl, toDateStr(todayJst()), config.horizonDays);
-    } catch (err) {
-      console.error("pricing: iCal 取り込みに失敗 (続行):", err);
+  if (db) {
+    const config = await getPricingConfig(db);
+    if (config.icalUrl) {
+      try {
+        await importIcalToDb(db, config.icalUrl, toDateStr(todayJst()), config.horizonDays);
+      } catch (err) {
+        console.error("pricing: iCal 取り込みに失敗 (続行):", err);
+      }
     }
   }
 
-  // 2. 推奨価格の算出
-  const dashboard = computePricingDashboard(await loadPricingInputs());
-  if (dashboard.dataSource === "demo") {
+  // 2. 推奨価格の算出 (渡された db から読む。null ならデモ)
+  const dashboard = computePricingDashboard(await loadPricingInputs(db));
+  if (!db || dashboard.dataSource === "demo") {
     return { saved: 0, alerts: dashboard.alerts.length, notified: 0, dashboard };
   }
   const today = dashboard.today;

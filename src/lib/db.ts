@@ -257,15 +257,21 @@ async function runSchemaMigrations(db: Client): Promise<void> {
       "INSERT INTO sync_state (key, value) VALUES ('migration:stagger-rates', datetime('now'))",
     );
   }
-  // 一度きり: 既存の料金カレンダーをスナップショット履歴の初期値として写す (成功後にフラグを立てる)
-  const backfilled = await db.execute(
-    "SELECT value FROM sync_state WHERE key = 'migration:snapshot-backfill'",
-  );
-  if (backfilled.rows.length === 0) {
-    await db.execute(SNAPSHOT_BACKFILL_SQL);
-    await db.execute(
-      `INSERT INTO sync_state (key, value) VALUES ('migration:snapshot-backfill', datetime('now'))
-       ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+  // 一度きり: 既存の料金カレンダーをスナップショット履歴の初期値として写す (成功後にフラグを立てる)。
+  // 履歴の初期値に過ぎないため、失敗しても例外を投げず (画面表示を止めない)、フラグを立てずに次のプロセスで再試行する。
+  // INSERT OR IGNORE なので途中まで書けていても再実行は安全。
+  try {
+    const backfilled = await db.execute(
+      "SELECT value FROM sync_state WHERE key = 'migration:snapshot-backfill'",
     );
+    if (backfilled.rows.length === 0) {
+      await db.execute(SNAPSHOT_BACKFILL_SQL);
+      await db.execute(
+        `INSERT INTO sync_state (key, value) VALUES ('migration:snapshot-backfill', datetime('now'))
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+      );
+    }
+  } catch (err) {
+    console.error("calendar_snapshots の初期バックフィルに失敗しました (次回再試行します):", err);
   }
 }

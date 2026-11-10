@@ -10,8 +10,13 @@
  *   "entire_home"/"private_room"/"hotel_room"。reservedShare 0.6〜0.95。
  *   CompSet 12件の ratesSyncedAt/lastAttemptAt: 9件 today−1、1件 today−20 (stale)、1件 null/null (none)、
  *   1件 ratesSyncedAt null かつ lastAttemptAt today−2 (failed)
- * - calendar: ratesSyncedAt があるものについて date ∈ [today−14, today+horizon+7]、fetchedAt = ratesSyncedAt
- *   (stale 物件は today−20 時点の状態)。予約確率は「週末 > 平日」「リードタイムが近いほど高い」
+ * - calendar: ratesSyncedAt があるものについて date ∈ [today−14, today+horizon+7]。
+ *   実データの daily_metrics と同じく、各行はその日以前で最後の取得時点の状態 (fetchedAt = その取得日):
+ *   fresh 物件は today−1 から過去へ 1〜4日間隔で取得した履歴 (today−8 を含む) を持つとみなし、
+ *   未来日 (date >= today−1) は fetchedAt = ratesSyncedAt、過去日 d は fetchedAt ∈ [d−3, d]
+ *   (泊まる直前に取得された状態 = 直近14日の実績が多数の物件から算出される)。
+ *   stale 物件は today−20 時点の状態で、未来日 (date >= today) の行のみ (過去日の行は取得が古すぎるため持たない)。
+ *   予約確率は「週末 > 平日」「リードタイムが近いほど高い」
  *   「特定連休 (年末年始等) は高い」を反映。price は adrRef × (週末1.2, 連休1.6) × ノイズ。予約不可日の price は 0
  * - snapshots: ratesSyncedAt を持つ物件のみ、snapshotDate ≤ その物件の ratesSyncedAt の日付だけ:
  *   fresh 物件は today−8 と today−1 の2時点 (today−1 の内容は calendar と一致。today−8 は数件ずつ予約が
@@ -294,15 +299,19 @@ export function buildDemoPricingInputs(today: string, config: PricingConfig): Pr
     return { available, price };
   };
 
-  // --- calendar ---
+  // --- calendar (各行 = その日以前で最後の取得時点の状態) ---
   const calendar: CalendarRow[] = [];
   const nCal = diffDays(calFrom, calTo);
   for (const c of candidates) {
     if (!c.ratesSyncedAt) continue;
+    const fetches = fetchHistory(c.id, c.ratesSyncedAt, today, calFrom);
     for (let i = 0; i <= nCal; i++) {
       const date = addDaysStr(calFrom, i);
-      const s = stateAt(c, date, c.ratesSyncedAt);
-      calendar.push({ propertyId: c.id, date, available: s.available, price: s.price, fetchedAt: c.ratesSyncedAt });
+      const fetchedAt = lastFetchOnOrBefore(fetches, date, c.ratesSyncedAt);
+      // 過去日は泊まる直前 (3日以内) に取得した行だけ持つ (stale 物件の過去日は取得が古すぎるため持たない)
+      if (fetchedAt === null || (date < today && diffDays(fetchedAt, date) > 3)) continue;
+      const s = stateAt(c, date, fetchedAt);
+      calendar.push({ propertyId: c.id, date, available: s.available, price: s.price, fetchedAt });
     }
   }
 
@@ -343,6 +352,37 @@ export function buildDemoPricingInputs(today: string, config: PricingConfig): Pr
     alertChannel: "none",
     lastNotifiedAt: null,
   };
+}
+
+/**
+ * 物件のカレンダー取得日 (新しい順)。fresh (ratesSyncedAt = today−1) は today−1 から過去へ 1〜4日間隔
+ * (today−8 は必ず含む: スナップショットの取得日)、calFrom−4 より前まで。それ以外は ratesSyncedAt のみ。
+ */
+function fetchHistory(id: string, ratesSyncedAt: string, today: string, calFrom: string): string[] {
+  const yesterday = addDaysStr(today, -1);
+  if (ratesSyncedAt !== yesterday) return [ratesSyncedAt];
+  const anchor = addDaysStr(today, -8);
+  const stop = addDaysStr(calFrom, -4);
+  const out: string[] = [yesterday];
+  let cur = yesterday;
+  while (cur >= stop) {
+    // 取得間隔は物件×日付で決まる (today がずれても同じ日は同じ間隔)
+    let next = addDaysStr(cur, -(1 + Math.floor(rngFor(`fetch|${id}|${cur}`)() * 4)));
+    if (cur > anchor && next < anchor) next = anchor;
+    out.push(next);
+    cur = next;
+  }
+  return out;
+}
+
+/**
+ * date の行を最後に更新した取得日: date >= ratesSyncedAt なら ratesSyncedAt、それ以外は date 以前で最新の取得日。
+ * 該当なし (stale 物件の過去日など) は null。
+ */
+function lastFetchOnOrBefore(fetches: string[], date: string, ratesSyncedAt: string): string | null {
+  if (date >= ratesSyncedAt) return ratesSyncedAt;
+  for (const f of fetches) if (f <= date) return f;
+  return null;
 }
 
 function toCandidate(spec: DemoSpec, ratesSyncedAt: string | null, lastAttemptAt: string | null): CandidateProperty {

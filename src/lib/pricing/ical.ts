@@ -128,23 +128,76 @@ function importStatusStmt(status: IcalImportStatus): InStatement {
   };
 }
 
+const MAX_ICAL_BYTES = 2 * 1024 * 1024;
+const MAX_REDIRECTS = 3;
+
+/** 本文を最大 MAX_ICAL_BYTES まで読む (巨大な応答でメモリを使い切らない) */
+async function readCapped(res: Response): Promise<string> {
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_ICAL_BYTES) {
+    throw new Error("iCalのサイズが大きすぎます（2MB超）");
+  }
+  if (!res.body) return await res.text();
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_ICAL_BYTES) {
+      await reader.cancel().catch(() => {});
+      throw new Error("iCalのサイズが大きすぎます（2MB超）");
+    }
+    chunks.push(value);
+  }
+  const buf = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    buf.set(c, off);
+    off += c.byteLength;
+  }
+  return new TextDecoder("utf-8").decode(buf);
+}
+
+/**
+ * iCal を取得する。リダイレクトは自動で追わず、転送先も Airbnb の iCal URL の場合だけ最大3回まで追う
+ * (許可外のホストへサーバーから接続しない)。本文は 2MB まで。
+ */
 async function fetchIcalText(url: string): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  let res: Response;
   try {
-    res = await fetch(url, {
-      signal: controller.signal,
-      headers: { Accept: "text/calendar, text/plain;q=0.9, */*;q=0.1" },
-    });
-  } catch (err) {
-    clearTimeout(timer);
-    const aborted = err instanceof Error && err.name === "AbortError";
-    throw new Error(aborted ? "iCalの取得がタイムアウトしました（15秒）" : "iCalの取得に失敗しました（通信エラー）");
-  }
-  try {
-    if (!res.ok) throw new Error(`iCalの取得に失敗しました（HTTP ${res.status}）`);
-    return await res.text();
+    let current = url;
+    for (let hop = 0; ; hop++) {
+      let res: Response;
+      try {
+        res = await fetch(current, {
+          signal: controller.signal,
+          redirect: "manual",
+          headers: { Accept: "text/calendar, text/plain;q=0.9, */*;q=0.1" },
+        });
+      } catch (err) {
+        const aborted = err instanceof Error && err.name === "AbortError";
+        throw new Error(aborted ? "iCalの取得がタイムアウトしました（15秒）" : "iCalの取得に失敗しました（通信エラー）");
+      }
+      if (res.status >= 300 && res.status < 400) {
+        const location = res.headers.get("location");
+        let next: string | null = null;
+        try {
+          next = location ? new URL(location, current).href : null;
+        } catch {
+          next = null;
+        }
+        if (!next || !isAllowedIcalUrl(next) || hop >= MAX_REDIRECTS) {
+          throw new Error("iCalの取得に失敗しました（Airbnb 以外への転送は追いません）");
+        }
+        current = next;
+        continue;
+      }
+      if (!res.ok) throw new Error(`iCalの取得に失敗しました（HTTP ${res.status}）`);
+      return await readCapped(res);
+    }
   } finally {
     clearTimeout(timer);
   }

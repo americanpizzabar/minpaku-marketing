@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { hasCronBearer } from "@/lib/cron-auth";
 import { toDateStr, todayJst } from "@/lib/dates";
 import { ensureSchema, getDb } from "@/lib/db";
 import { getPricingDashboard } from "@/lib/pricing";
@@ -17,11 +18,6 @@ const ICAL_URL_ERROR =
 const STATUS_LABEL: Record<OwnStatus, string> = { booked: "予約済", blocked: "ブロック", vacant: "空室" };
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-function cleanEnv(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  const cleaned = value.trim().replace(/^["']|["']$/g, "").trim();
-  return cleaned.length > 0 ? cleaned : undefined;
-}
 
 function reply(body: PricingApiResponse, status = 200) {
   return NextResponse.json(body, { status });
@@ -40,8 +36,7 @@ function isValidDate(date: unknown): date is string {
 
 /** 同一オリジン (Sec-Fetch-Site / Origin のホスト = Host) または CRON_SECRET の Bearer のみ許可 */
 function isAuthorized(request: NextRequest): boolean {
-  const secret = cleanEnv(process.env.CRON_SECRET);
-  if (secret && request.headers.get("authorization") === `Bearer ${secret}`) return true;
+  if (hasCronBearer(request.headers.get("authorization"))) return true;
   if (request.headers.get("sec-fetch-site") === "same-origin") return true;
   const origin = request.headers.get("origin");
   const host = request.headers.get("host");
@@ -61,8 +56,9 @@ export async function GET() {
     const dashboard = await getPricingDashboard();
     return NextResponse.json(dashboard);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: message }, { status: 500 });
+    // DB のエラー文 (SQL やホスト名を含みうる) は返さずサーバーログにだけ残す
+    console.error("GET /api/pricing failed:", err);
+    return NextResponse.json({ error: "価格データの読み込みに失敗しました（詳細はサーバーログ）" }, { status: 500 });
   }
 }
 
@@ -188,7 +184,13 @@ export async function POST(request: NextRequest) {
         return reply({ ok: false, message: "不明な操作です" }, 400);
     }
   } catch (err) {
+    console.error("POST /api/pricing failed:", err);
     const message = err instanceof Error ? err.message : String(err);
-    return reply({ ok: false, message: `処理に失敗しました: ${message}` }, 500);
+    // 自前の日本語エラー (iCal の取得失敗など) はそのまま見せ、DB 等の内部エラー文は返さない
+    const userFacing = /[\u3040-\u30ff\u4e00-\u9fff]/.test(message);
+    return reply(
+      { ok: false, message: userFacing ? `処理に失敗しました: ${message}` : "処理に失敗しました（詳細はサーバーログ）" },
+      500,
+    );
   }
 }

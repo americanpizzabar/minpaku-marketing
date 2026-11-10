@@ -96,8 +96,6 @@ export async function loadDataset(
   };
 }
 
-let schemaReady: Promise<void> | null = null;
-
 async function loadFromTurso(
   start: string,
   end: string,
@@ -106,9 +104,9 @@ async function loadFromTurso(
 ): Promise<Dataset> {
   const db = getDb()!;
 
-  // 初回アクセス時にスキーマを自動作成する (migrate実行を不要にする)
-  if (!schemaReady) schemaReady = ensureSchema(db);
-  await schemaReady;
+  // 初回アクセス時にスキーマを自動作成する (migrate実行を不要にする)。
+  // ensureSchema は接続ごとにメモ化し、失敗時はメモを消して次回再試行する (一時的な失敗で画面が壊れたままにならない)
+  await ensureSchema(db);
 
   const [propsRes, metricsRes, luminaRes, luminaPacingRes, pacingRes, syncRes, luminaCfgRes, calCountRes] = await Promise.all([
     // details_json は重いため一覧取得では読まない (物件詳細APIでのみ取得)

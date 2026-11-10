@@ -131,13 +131,23 @@ function peakPeriods(v: unknown, fallback: PeakPeriod[]): PeakPeriod[] {
   return out.slice(0, 20);
 }
 
+/**
+ * Airbnb の公式ドメイン (完全一致)。"airbnb." で始まる任意のドメイン (airbnb.evil.com など) を通さないよう、
+ * サフィックスを列挙する。
+ */
+const AIRBNB_HOST =
+  /^(www\.)?airbnb\.(com|jp|ca|de|fr|it|es|nl|ch|at|be|ie|pt|se|dk|no|fi|pl|cz|gr|cn|co\.jp|co\.uk|co\.nz|co\.kr|co\.in|com\.au|com\.sg|com\.hk|com\.tw|com\.my|com\.br|com\.mx|com\.ar)$/i;
+
 /** Airbnb の iCal エクスポート URL のみ許可 (任意ホストへのサーバー側 fetch を防ぐ) */
 export function isAllowedIcalUrl(url: string): boolean {
   try {
     const u = new URL(url);
     return (
       u.protocol === "https:" &&
-      /^(www\.)?airbnb\.[a-z.]{2,10}$/i.test(u.hostname) &&
+      u.port === "" &&
+      u.username === "" &&
+      u.password === "" &&
+      AIRBNB_HOST.test(u.hostname) &&
       u.pathname.startsWith("/calendar/ical/")
     );
   } catch {

@@ -7,6 +7,7 @@ import type { Client } from "@libsql/client";
 import { freshDb, jstToday } from "./data-fixtures.test";
 import { addDaysStr } from "./holidays";
 import { ICAL_LAST_IMPORT_KEY, importIcalToDb } from "./ical";
+import { isAllowedIcalUrl } from "./config";
 
 const URL_OK = "https://www.airbnb.com/calendar/ical/123.ics?s=abc";
 const realFetch = globalThis.fetch;
@@ -93,6 +94,63 @@ describe("importIcalToDb", () => {
     const st = await lastStatus(db);
     assert.equal(st.ok, false);
     assert.ok(st.error);
+  });
+
+  it("URL の許可は Airbnb の公式ドメインの完全一致のみ", () => {
+    for (const ok of [
+      "https://www.airbnb.com/calendar/ical/1.ics?s=x",
+      "https://airbnb.jp/calendar/ical/1.ics",
+      "https://www.airbnb.co.uk/calendar/ical/1.ics",
+      "https://www.airbnb.com.au/calendar/ical/1.ics",
+    ]) {
+      assert.equal(isAllowedIcalUrl(ok), true, ok);
+    }
+    for (const ng of [
+      "https://airbnb.evil.com/calendar/ical/1.ics",
+      "https://airbnb.localhost/calendar/ical/x",
+      "https://airbnb.internal/calendar/ical/x",
+      "https://www.airbnb.com.evil.io/calendar/ical/1.ics",
+      "https://www.airbnb.com:8443/calendar/ical/1.ics",
+      "https://user:pw@www.airbnb.com/calendar/ical/1.ics",
+      "http://www.airbnb.com/calendar/ical/1.ics",
+      "https://www.airbnb.com/users/show/1",
+    ]) {
+      assert.equal(isAllowedIcalUrl(ng), false, ng);
+    }
+  });
+
+  it("リダイレクトは Airbnb の iCal URL への転送だけ追い、それ以外は取得しない", async () => {
+    const db = await freshDb();
+    const today = jstToday();
+    const seen: string[] = [];
+    const cal = ics([[addDaysStr(today, 3), addDaysStr(today, 5), "Reserved"]]);
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      seen.push(url);
+      if (url.includes("/calendar/ical/1.ics")) {
+        return new Response(null, { status: 302, headers: { location: "https://www.airbnb.jp/calendar/ical/2.ics" } });
+      }
+      if (url.includes("/calendar/ical/2.ics")) return new Response(cal, { status: 200 });
+      if (url.includes("/calendar/ical/3.ics")) {
+        return new Response(null, { status: 302, headers: { location: "http://169.254.169.254/latest/meta-data" } });
+      }
+      throw new Error(`unexpected ${url}`);
+    }) as typeof fetch;
+    await importIcalToDb(db, "https://www.airbnb.com/calendar/ical/1.ics", today, 60);
+    assert.deepEqual(seen, ["https://www.airbnb.com/calendar/ical/1.ics", "https://www.airbnb.jp/calendar/ical/2.ics"]);
+    assert.equal((await bookings(db)).length, 2);
+
+    seen.length = 0;
+    await assert.rejects(importIcalToDb(db, "https://www.airbnb.com/calendar/ical/3.ics", today, 60), /転送は追いません/);
+    assert.deepEqual(seen, ["https://www.airbnb.com/calendar/ical/3.ics"], "許可外の転送先には接続しない");
+    assert.equal((await bookings(db)).length, 2, "既存データは消さない");
+  });
+
+  it("2MB を超える応答は読み込まず失敗にする", async () => {
+    const db = await freshDb();
+    const big = "BEGIN:VCALENDAR\r\n" + "X".repeat(2 * 1024 * 1024 + 10);
+    serve(big);
+    await assert.rejects(importIcalToDb(db, URL_OK, jstToday(), 60), /大きすぎます/);
   });
 
   it("HTTP エラー・iCal でない本文・空の iCal (既存あり) では既存データを消さない", async () => {

@@ -68,6 +68,8 @@ export const SCHEMA_SQL = [
     UNIQUE(property_id, target_date)
   )`,
   `CREATE INDEX IF NOT EXISTS idx_daily_metrics_date ON daily_metrics(target_date)`,
+  // 価格最適化の候補一覧で物件ごとの最終取得日 MAX(fetched_at) を索引1回で引く (全行走査を避ける)
+  `CREATE INDEX IF NOT EXISTS idx_daily_metrics_prop_fetched ON daily_metrics(property_id, fetched_at)`,
   `CREATE TABLE IF NOT EXISTS area_monthly_summaries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     area TEXT NOT NULL,

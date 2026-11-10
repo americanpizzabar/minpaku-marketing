@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { hasCronBearer } from "@/lib/cron-auth";
 
 /**
  * BASIC_AUTH_USER / BASIC_AUTH_PASSWORD を両方設定した場合のみ
@@ -12,6 +13,9 @@ export function middleware(request: NextRequest) {
   if (request.nextUrl.pathname.startsWith("/api/cron")) return NextResponse.next();
 
   const auth = request.headers.get("authorization");
+  // /api/pricing のリモート操作用: CRON_SECRET と一致する Bearer のみ通す (Basic 認証の代わり。ルート側でも検証する)
+  if (request.nextUrl.pathname === "/api/pricing" && hasCronBearer(auth)) return NextResponse.next();
+
   if (auth?.startsWith("Basic ")) {
     const [u, p] = atob(auth.slice(6)).split(":");
     if (u === user && p === password) return NextResponse.next();

@@ -47,18 +47,26 @@ function severityRank(s: string): number {
  * CompSet カレンダーを取得する (有料: $0.10/件)。定期実行と「今すぐ取得」ボタンの両方から使う。
  * - 対象 = selectCompsetRefreshTargets(db, { ids: opts.ids, staleDays: opts.staleDays, limit })
  *   limit = min(opts.maxCalls, 設定画面の dailyRatesCalls (getSyncConfig), 50)
- * - 1日あたりの上限: sync_state "pricing:refresh_calls:{今日JST}" の累計 + 対象数 が dailyRatesCalls を超える分は取得しない
+ * - 1日あたりの上限: sync_state "pricing:refresh_calls:{今日JST}" の累計 + 対象数 が dailyRatesCalls を超える分は取得しない。
+ *   並行実行 (cron の二重配信・ボタンの同時押し) でも上限を超えないよう、取得前に予定件数を条件付き UPSERT で
+ *   原子的に確保し、終了後に使わなかった分を差し戻す (絶対値で上書きしない)
+ * - 各物件は取得前に properties.rates_synced_at を「今日 (JST) 未試行なら現在時刻に」更新して確保し、
+ *   更新できなかった (別の実行が今日すでに試行した) 物件は取得しない (同じ物件を二重に課金しない)
  * - 各 id について airroi.ts の refreshRatesForProperty を呼ぶ (内部でスナップショットも保存される)。
- *   5件ずつ並列、合計 200 秒を超えたら打ち切り
- * - 実行後、累計カウンタを更新し、sync_logs に (sync_type 'pricing_compset', records_fetched, api_calls_count, status) を記録
+ *   5件ずつ並列、合計 200 秒 (opts.deadline があればその時刻まで) を超えたら打ち切り
+ * - 実行後、sync_logs に (sync_type 'pricing_compset', records_fetched, api_calls_count, status) を記録
  * - 戻り値: refreshed = 実際に API を呼んだ件数、costUsd = round2(refreshed × 0.10)、
  *   skipped = 日次上限などで取得しなかった件数
  */
 export async function refreshCompsetCalendars(
   db: Client,
-  opts: { maxCalls: number; staleDays?: number; ids?: string[] },
+  opts: { maxCalls: number; staleDays?: number; ids?: string[]; deadline?: number },
 ): Promise<{ refreshed: number; costUsd: number; skipped: number }> {
   const startedAt = Date.now();
+  const stopAt = Math.min(
+    startedAt + REFRESH_BUDGET_MS,
+    opts.deadline !== undefined && Number.isFinite(opts.deadline) ? opts.deadline : Infinity,
+  );
   const today = toDateStr(todayJst());
   const sync = await getSyncConfig(db);
   const dailyCap = Math.max(0, Math.floor(sync.dailyRatesCalls));
@@ -85,29 +93,54 @@ export async function refreshCompsetCalendars(
   }
 
   const counterKey = `${REFRESH_COUNTER_PREFIX}${today}`;
-  const counterRes = await db.execute({
-    sql: "SELECT value FROM sync_state WHERE key = ?",
-    args: [counterKey],
-  });
-  const usedRaw = Number(counterRes.rows[0]?.value ?? 0);
-  const usedToday = Number.isFinite(usedRaw) && usedRaw > 0 ? Math.floor(usedRaw) : 0;
-  const allowance = Math.max(0, Math.min(limit, dailyCap - usedToday));
-  const planned = eligible.slice(0, allowance);
-
-  const writeCounter = (value: number) =>
-    db.execute({
-      sql: `INSERT INTO sync_state (key, value) VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
-      args: [counterKey, String(value)],
+  const readUsed = async (): Promise<number> => {
+    const res = await db.execute({ sql: "SELECT value FROM sync_state WHERE key = ?", args: [counterKey] });
+    const v = Number(res.rows[0]?.value ?? 0);
+    return Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+  };
+  /** 日次の枠から n 件を原子的に確保する (確保できた件数を返す。並行実行と競合したら読み直して再試行) */
+  const claimBudget = async (): Promise<number> => {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const used = await readUsed();
+      const n = Math.max(0, Math.min(limit, eligible.length, dailyCap - used));
+      if (n === 0) return 0;
+      const res = await db.execute({
+        sql: `INSERT INTO sync_state (key, value) VALUES (?, ?)
+              ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(sync_state.value AS INTEGER) + CAST(? AS INTEGER) AS TEXT)
+              WHERE CAST(sync_state.value AS INTEGER) = CAST(? AS INTEGER)
+                AND CAST(sync_state.value AS INTEGER) + CAST(? AS INTEGER) <= CAST(? AS INTEGER)`,
+        args: [counterKey, String(n), n, used, n, dailyCap],
+      });
+      if (res.rowsAffected > 0) return n;
+    }
+    return 0;
+  };
+  /** 確保した枠のうち使わなかった分を差し戻す */
+  const refund = (unused: number) =>
+    unused > 0
+      ? db.execute({
+          sql: `UPDATE sync_state SET value = CAST(MAX(0, CAST(value AS INTEGER) - CAST(? AS INTEGER)) AS TEXT) WHERE key = ?`,
+          args: [unused, counterKey],
+        })
+      : Promise.resolve();
+  /** 物件を「今日試行済み」にして確保する。別の実行が今日すでに試行していれば false */
+  const claimProperty = async (id: string): Promise<boolean> => {
+    const res = await db.execute({
+      sql: `UPDATE properties SET rates_synced_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND (rates_synced_at IS NULL OR date(rates_synced_at, '+9 hours') < ?)`,
+      args: [id, today],
     });
+    return res.rowsAffected > 0;
+  };
+
+  const claimed = await claimBudget();
+  const planned = eligible.slice(0, claimed);
 
   let refreshed = 0;
   let records = 0;
   let failed = 0; // 取得できなかった件数 (refreshRatesForProperty は取得失敗を内部で握りつぶし 0 件を返す)
   let errorMessage: string | null = null;
   if (planned.length > 0) {
-    // 並行実行でも上限を超えないよう、先に予定件数を計上しておく (終了後に実数へ補正)
-    await writeCounter(usedToday + planned.length);
     const propRes = await db.execute({
       sql: `SELECT id, airroi_id, max_guests FROM properties WHERE id IN (${planned.map(() => "?").join(",")})`,
       args: planned,
@@ -121,8 +154,11 @@ export async function refreshCompsetCalendars(
     const queue = planned.map((id) => props.get(id)).filter((p): p is NonNullable<typeof p> => p !== undefined);
     try {
       for (let i = 0; i < queue.length; i += REFRESH_CONCURRENCY) {
-        if (Date.now() - startedAt > REFRESH_BUDGET_MS) break;
-        const batch = queue.slice(i, i + REFRESH_CONCURRENCY);
+        if (Date.now() > stopAt) break;
+        const candidates = queue.slice(i, i + REFRESH_CONCURRENCY);
+        const batch: typeof candidates = [];
+        for (const p of candidates) if (await claimProperty(p.id)) batch.push(p);
+        if (batch.length === 0) continue;
         const results = await Promise.allSettled(batch.map((p) => refreshRatesForProperty(db, p)));
         // 取得の成否に関係なく API は呼ばれている (費用は発生) ので件数に含める
         refreshed += batch.length;
@@ -137,7 +173,7 @@ export async function refreshCompsetCalendars(
         }
       }
     } finally {
-      await writeCounter(usedToday + refreshed).catch(() => {});
+      await refund(claimed - refreshed).catch(() => {});
     }
   }
 
@@ -315,20 +351,38 @@ export async function runPricingPipeline(
       return prev === undefined || severityRank(String(r.severity)) > prev;
     });
     if (targets.length > 0) {
-      const alerts: PricingAlert[] = targets.map((r) => ({
-        date: String(r.target_date),
-        kind: String(r.kind) as PricingAlert["kind"],
-        severity: String(r.severity) as PricingAlert["severity"],
-        message: String(r.message),
-      }));
-      const sent = await sendAlertWebhook(alerts);
-      if (sent) {
-        const ids = targets.map((r) => Number(r.id));
-        await db.execute({
-          sql: `UPDATE pricing_alerts SET notified_at = CURRENT_TIMESTAMP WHERE id IN (${ids.map(() => "?").join(",")})`,
-          args: ids,
-        });
-        notified = ids.length;
+      // 並行実行 (cron の二重配信など) で同じ通知を2回送らないよう、送信前に行を原子的に確保する
+      const token = `sending:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
+      const ids = targets.map((r) => Number(r.id));
+      await db.execute({
+        sql: `UPDATE pricing_alerts SET notified_at = ?
+              WHERE id IN (${ids.map(() => "?").join(",")}) AND notified_at IS NULL`,
+        args: [token, ...ids],
+      });
+      const claimedRes = await db.execute({
+        sql: "SELECT id FROM pricing_alerts WHERE notified_at = ?",
+        args: [token],
+      });
+      const claimedIds = new Set(claimedRes.rows.map((r) => Number(r.id)));
+      const mine = targets.filter((r) => claimedIds.has(Number(r.id)));
+      if (mine.length > 0) {
+        const alerts: PricingAlert[] = mine.map((r) => ({
+          date: String(r.target_date),
+          kind: String(r.kind) as PricingAlert["kind"],
+          severity: String(r.severity) as PricingAlert["severity"],
+          message: String(r.message),
+        }));
+        let sent = false;
+        try {
+          sent = await sendAlertWebhook(alerts);
+        } finally {
+          await db.execute({
+            // 送れなかったら未通知に戻して次回に再送できるようにする
+            sql: `UPDATE pricing_alerts SET notified_at = ${sent ? "CURRENT_TIMESTAMP" : "NULL"} WHERE notified_at = ?`,
+            args: [token],
+          });
+        }
+        if (sent) notified = mine.length;
       }
     }
     await db.execute({

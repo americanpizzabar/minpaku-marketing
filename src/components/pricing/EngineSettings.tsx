@@ -478,6 +478,7 @@ export default function EngineSettings({ d, api }: { d: PricingDashboard; api: P
               毎日の定期実行で競合カレンダーを取得します（$0.10/件）。月額目安 = min({members}件, 上限) × $0.10 × 30 / 周期 ={" "}
               <span className="font-bold text-slate-800">約{usd(monthly)}/月</span>
               {cfg.compsetAutoRefresh ? "" : "（現在オフ: 費用は発生しません）"}
+              。データ設定の「1日の料金カレンダー取得上限」とは別枠で、この取得にも同じ件数の日次上限がかかります。
             </>
           }
         >

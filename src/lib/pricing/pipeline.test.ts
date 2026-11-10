@@ -113,6 +113,24 @@ describe("refreshCompsetCalendars", () => {
     assert.equal(ratesCalls().length, 0);
   });
 
+  it("並行実行 (cron の二重配信・ボタンの同時押し) でも日次上限を超えず、同じ物件を二重に取得しない", async () => {
+    const db = await freshDb();
+    const seed = await seedRealistic(db, { dailyRatesCalls: 5 });
+    const [a, b] = await Promise.all([
+      refreshCompsetCalendars(db, { maxCalls: 10, staleDays: 1 }),
+      refreshCompsetCalendars(db, { maxCalls: 10, staleDays: 1 }),
+    ]);
+    const ids = ratesCalls().map((c) => new URL(c.url).searchParams.get("id"));
+    assert.ok(ids.length <= 5, `API 呼び出し ${ids.length} 件 (上限 5)`);
+    assert.equal(new Set(ids).size, ids.length, "同じ物件を二重に取得しない");
+    assert.equal(a.refreshed + b.refreshed, ids.length);
+    assert.equal(
+      await scalar(db, "SELECT value FROM sync_state WHERE key = ?", [`pricing:refresh_calls:${seed.today}`]),
+      String(ids.length),
+      "カウンタは実際の呼び出し件数と一致 (使わなかった枠は差し戻す)",
+    );
+  });
+
   it("ids が与えられたら積集合だけ (CompSet 外・今日取得済みは取得しない)", async () => {
     const db = await freshDb();
     const seed = await seedRealistic(db);
@@ -337,6 +355,24 @@ describe("runPricingPipeline", () => {
       args: [today],
     });
     assert.equal(Number(sentAfter.rows[0].c), notifiedDates.length);
+  });
+
+  it("並行実行でも同じ通知を2回送らない", async () => {
+    const db = await freshDb();
+    const seed = await seedRealistic(db);
+    await forceWeekendAlerts(db, seed);
+    process.env.ALERT_WEBHOOK_URL = "https://hooks.example.invalid/x";
+    const [a, b] = await Promise.all([
+      runPricingPipeline(db, { notify: true }),
+      runPricingPipeline(db, { notify: true }),
+    ]);
+    assert.ok(a.notified + b.notified > 0);
+    assert.equal(hookCalls().length, 1, "Webhook は1回だけ");
+    assert.equal(
+      Number(await scalar(db, "SELECT COUNT(*) FROM pricing_alerts WHERE notified_at LIKE 'sending:%'")),
+      0,
+      "確保用の一時値が残らない",
+    );
   });
 
   it("Webhook 失敗・未設定なら notified_at を付けない (次回再送できる)", async () => {

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { isCronAuthorized } from "@/lib/cron-auth";
 import { ensureSchema, getDb } from "@/lib/db";
 import { runPricingPipeline } from "@/lib/pricing/pipeline";
 
@@ -11,12 +12,8 @@ export const maxDuration = 120;
  * (同じ状況は重複して送らない。未設定ならアプリ内表示のみ)。API費用は発生しない。
  */
 export async function GET(request: NextRequest) {
-  const cronSecret = process.env.CRON_SECRET;
-  if (cronSecret) {
-    const auth = request.headers.get("authorization");
-    if (auth !== `Bearer ${cronSecret}`) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+  if (!isCronAuthorized(request.headers.get("authorization"))) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   const db = getDb();

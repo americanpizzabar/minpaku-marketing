@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { isCronAuthorized } from "@/lib/cron-auth";
 import { ensureSchema, getDb } from "@/lib/db";
 import { getPricingConfig } from "@/lib/pricing/config-store";
 import { refreshCompsetCalendars, runPricingPipeline } from "@/lib/pricing/pipeline";
@@ -6,6 +7,9 @@ import { runChunkedSync, type SyncRunResult } from "@/lib/sync-runner";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
+
+/** CompSet 取得を打ち切る時刻 (リクエスト開始から)。残りで推奨価格の再計算・保存を行う */
+const CRON_FETCH_DEADLINE_MS = 250_000;
 
 /**
  * Vercel Cron から毎日 17:00 UTC (JST 午前2時) に呼び出される日次処理 (仕様6章のパイプライン)。
@@ -17,12 +21,9 @@ export const maxDuration = 300;
  * 各段の失敗は捕捉して応答に含め、HTTP ステータスは同期 (1) の結果のみで決める。
  */
 export async function GET(request: NextRequest) {
-  const cronSecret = process.env.CRON_SECRET;
-  if (cronSecret) {
-    const auth = request.headers.get("authorization");
-    if (auth !== `Bearer ${cronSecret}`) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+  const startedAt = Date.now();
+  if (!isCronAuthorized(request.headers.get("authorization"))) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   let sync: SyncRunResult | { status: "FAILED"; error: string };
@@ -46,6 +47,8 @@ export async function GET(request: NextRequest) {
           compset = await refreshCompsetCalendars(db, {
             maxCalls: cfg.compsetRefreshMax,
             staleDays: cfg.compsetRefreshDays,
+            // 関数の実行上限 (300秒) 内に推奨価格の保存 (3) まで終えられるよう、取得はここまでで打ち切る
+            deadline: startedAt + CRON_FETCH_DEADLINE_MS,
           });
         } catch (err) {
           compset = { error: err instanceof Error ? err.message : String(err) };

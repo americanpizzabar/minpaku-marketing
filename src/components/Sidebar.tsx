@@ -116,6 +116,7 @@ export default function Sidebar({ dataSource }: { dataSource: "turso" | "demo" }
               ["/map", "🗺 地図"],
               ["/analysis", "🎯 分析"],
               ["/lab", "🧪 収益ラボ"],
+              ["/pricing", "💹 価格最適化"],
               ["/database", "🗄 データ"],
               ["/settings", "⚙ 設定"],
             ] as const

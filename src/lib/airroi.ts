@@ -44,6 +44,11 @@ function cleanEnv(value: string | undefined): string | undefined {
   return cleaned.length > 0 ? cleaned : undefined;
 }
 
+/** AIRROI_API_KEY が設定されているか (未設定のまま呼ぶと取得失敗扱いで取得試行日だけが進んでしまうため、呼び出し前の確認用) */
+export function isAirRoiConfigured(): boolean {
+  return cleanEnv(process.env.AIRROI_API_KEY) !== undefined;
+}
+
 function apiKeyOrThrow(): string {
   const apiKey = cleanEnv(process.env.AIRROI_API_KEY);
   if (!apiKey) throw new Error("AIRROI_API_KEY が設定されていません");

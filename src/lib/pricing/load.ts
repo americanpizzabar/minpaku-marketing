@@ -100,7 +100,7 @@ async function loadContext(db: Client): Promise<LoadContext> {
 }
 
 /**
- * DB が設定されていれば DB から、無ければ buildDemoPricingInputs(todayJst, getPricingConfig 相当の既定値) で組み立てる。
+ * db (省略時は getDb()) があれば DB から、無ければ buildDemoPricingInputs(todayJst, getPricingConfig 相当の既定値) で組み立てる。
  * DB の場合 (ensureSchema をプロセス内で1回だけ実行してから):
  * - today = JST の今日 (dates.ts の todayJst → toDateStr)
  * - config = getPricingConfig(db)、sync = getSyncConfig(db)
@@ -123,8 +123,7 @@ async function loadContext(db: Client): Promise<LoadContext> {
  * - lastNotifiedAt = SELECT MAX(notified_at) FROM pricing_alerts WHERE notified_at IS NOT NULL AND notified_at <> 'skipped'
  * 大量の IN 句は 400 件ずつに分割してよい。
  */
-export async function loadPricingInputs(): Promise<PricingInputs> {
-  const db = getDb();
+export async function loadPricingInputs(db: Client | null = getDb()): Promise<PricingInputs> {
   if (!db) {
     return buildDemoPricingInputs(toDateStr(todayJst()), normalizePricingConfig(DEFAULT_PRICING_CONFIG));
   }

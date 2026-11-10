@@ -99,7 +99,79 @@ export const SCHEMA_SQL = [
     key TEXT PRIMARY KEY,
     value TEXT
   )`,
+  // --- ダイナミックプライシング (docs/pricing-module.md の「DBスキーマ」) ---
+  `CREATE TABLE IF NOT EXISTS calendar_snapshots (
+    snapshot_date TEXT NOT NULL,
+    property_id TEXT NOT NULL,
+    target_date TEXT NOT NULL,
+    is_available INTEGER NOT NULL,
+    price_jpy REAL NOT NULL,
+    PRIMARY KEY (property_id, snapshot_date, target_date)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_snapshots_target ON calendar_snapshots(target_date)`,
+  `CREATE INDEX IF NOT EXISTS idx_snapshots_date ON calendar_snapshots(snapshot_date)`,
+  `CREATE TABLE IF NOT EXISTS pricing_recommendations (
+    generated_date TEXT NOT NULL,
+    target_date TEXT NOT NULL,
+    lead_days INTEGER,
+    day_type TEXT,
+    day_type_reason TEXT,
+    comp_units INTEGER,
+    comp_occ REAL,
+    comp_occ_adj REAL,
+    comp_occ_raw REAL,
+    comp_adr REAL,
+    remaining_units INTEGER,
+    pace_index REAL,
+    pace_raw REAL,
+    new_bookings INTEGER,
+    spike INTEGER,
+    base_price REAL,
+    delta REAL,
+    alpha REAL,
+    beta REAL,
+    gamma REAL,
+    raw_price REAL,
+    floor_price REAL,
+    ceiling_price REAL,
+    recommended_price REAL,
+    clamped_by TEXT,
+    current_price REAL,
+    current_price_source TEXT,
+    own_status TEXT,
+    change_pct REAL,
+    action TEXT,
+    signal TEXT,
+    PRIMARY KEY (generated_date, target_date)
+  )`,
+  `CREATE TABLE IF NOT EXISTS pricing_alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    generated_date TEXT NOT NULL,
+    target_date TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    message TEXT NOT NULL,
+    notified_at TEXT,
+    UNIQUE (generated_date, target_date, kind)
+  )`,
+  `CREATE TABLE IF NOT EXISTS lumina_bookings (
+    target_date TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    source TEXT NOT NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`,
 ];
+
+/**
+ * 一度きりのバックフィル: 既存の daily_metrics (各物件の最新取得時点の状態) を、その取得日 (JST) の
+ * スナップショットとして calendar_snapshots に写す。直近120日に取得した分の、取得日から134日先までに限定。
+ */
+export const SNAPSHOT_BACKFILL_SQL = `INSERT OR IGNORE INTO calendar_snapshots (snapshot_date, property_id, target_date, is_available, price_jpy)
+  SELECT date(fetched_at, '+9 hours'), property_id, target_date, is_available,
+         CASE WHEN is_available THEN price_jpy ELSE 0 END
+  FROM daily_metrics
+  WHERE date(fetched_at, '+9 hours') >= date('now', '+9 hours', '-120 days')
+    AND target_date BETWEEN date(fetched_at, '+9 hours') AND date(fetched_at, '+9 hours', '+134 days')`;
 
 // 増分マイグレーションで properties に追加する列 (存在すればスキップ)
 const PROPERTY_EXTRA_COLUMNS: [string, string][] = [
@@ -126,7 +198,26 @@ const PROPERTY_EXTRA_COLUMNS: [string, string][] = [
   ["details_json", "TEXT"],
 ];
 
-export async function ensureSchema(db: Client): Promise<void> {
+// Client ごとに1回だけスキーマ作成・マイグレーションを行う (各リクエストで呼ばれても安価にするため)
+const schemaPromises = new WeakMap<Client, Promise<void>>();
+
+/**
+ * スキーマ作成と増分マイグレーション。プロセス内で Client ごとに1回だけ実行する (メモ化)。
+ * 失敗した場合はメモを破棄し、次回の呼び出しで再試行する。
+ */
+export function ensureSchema(db: Client): Promise<void> {
+  let p = schemaPromises.get(db);
+  if (!p) {
+    p = runSchemaMigrations(db).catch((err: unknown) => {
+      schemaPromises.delete(db);
+      throw err;
+    });
+    schemaPromises.set(db, p);
+  }
+  return p;
+}
+
+async function runSchemaMigrations(db: Client): Promise<void> {
   for (const sql of SCHEMA_SQL) {
     await db.execute(sql);
   }
@@ -164,6 +255,17 @@ export async function ensureSchema(db: Client): Promise<void> {
     );
     await db.execute(
       "INSERT INTO sync_state (key, value) VALUES ('migration:stagger-rates', datetime('now'))",
+    );
+  }
+  // 一度きり: 既存の料金カレンダーをスナップショット履歴の初期値として写す (成功後にフラグを立てる)
+  const backfilled = await db.execute(
+    "SELECT value FROM sync_state WHERE key = 'migration:snapshot-backfill'",
+  );
+  if (backfilled.rows.length === 0) {
+    await db.execute(SNAPSHOT_BACKFILL_SQL);
+    await db.execute(
+      `INSERT INTO sync_state (key, value) VALUES ('migration:snapshot-backfill', datetime('now'))
+       ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
     );
   }
 }

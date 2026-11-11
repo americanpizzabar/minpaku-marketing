@@ -55,6 +55,9 @@
  *       - ownStatusSource "none": "自社の予約状況が未連携です（iCal連携または手動入力で反映）"
  *       - icalConfigured かつ icalLastImport が (null か !ok か 2日以上前): "iCal取り込みが{at}以降失敗/停止しています（{error}）"
  *       - ownPriceSource "assumed": "自社の現在価格が未入力のため、乖離率は表示していません（設定で「Airbnbで設定中の価格」を入力すると比較できます）"
+ *       - 現在価格が AirROI の実価格 (api) の日があり、平日 (ピーク除く) の実価格の中央値が基準価格から ±25% 超ずれる:
+ *         "AirROI上の実際の販売価格（向こう{H}日の平日中央値 ¥{m}）が基準価格 ¥{base} と{x}%ずれています…"
+ *         (ルールのみの推奨は基準価格から算出されるため、基準価格の見直しを促す)
  *       - basePriceAboveAll: "自社基準価格は品質同等の周辺物件すべての参照ADRを上回ります（最高 ¥{max}）"
  *         それ以外で basePricePercentile >= 90: "自社基準価格は品質同等の周辺物件の上位{max(0.1, 100−pct)}%に位置します"
  *       - alertChannel "none": "アラートは画面表示のみで、通知先（Slack/Discord等）は未設定です"
@@ -375,6 +378,25 @@ export function computePricingDashboard(inputs: PricingInputs, now?: string): Pr
     warnings.push(
       "自社の現在価格が未入力のため、乖離率は表示していません（設定で「Airbnbで設定中の価格」を入力すると比較できます）",
     );
+  }
+  if (basePrice > 0) {
+    const apiWeekday = days
+      .filter((x) => x.own.currentPriceSource === "api" && x.night.type === "weekday" && x.night.peakPeriod == null)
+      .map((x) => x.own.currentPrice)
+      .filter((v): v is number => v != null && Number.isFinite(v) && v > 0)
+      .sort((a, b) => a - b);
+    if (apiWeekday.length >= 5) {
+      const mid = Math.floor(apiWeekday.length / 2);
+      const med = apiWeekday.length % 2 ? apiWeekday[mid] : (apiWeekday[mid - 1] + apiWeekday[mid]) / 2;
+      const gap = (med / basePrice - 1) * 100;
+      if (Math.abs(gap) > 25) {
+        warnings.push(
+          `AirROI上の実際の販売価格（向こう${H}日の平日中央値 ${formatYen(med)}）が基準価格 ${formatYen(basePrice)} と` +
+            `${Math.round(Math.abs(gap))}%${gap < 0 ? "低く" : "高く"}なっています。推奨価格は基準価格から算出されるため、` +
+            "設定の「基準価格 P_base (平日)」が実態に合っているか確認してください",
+        );
+      }
+    }
   }
   if (compset.basePriceAboveAll) {
     warnings.push(

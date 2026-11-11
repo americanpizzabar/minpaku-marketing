@@ -601,6 +601,7 @@ export function isotonicNonIncreasing(points: { x: number; y: number; w: number 
 }
 
 interface CurveObs {
+  id: string; // 物件
   date: string;
   lead: number;
   b: number;
@@ -654,23 +655,28 @@ function buildCurve(type: NightType, obs: CurveObs[], config: PricingConfig): Bo
   const sumB = new Array<number>(H + 1).fill(0);
   const sumE = new Array<number>(H + 1).fill(0);
   const cnt = new Array<number>(H + 1).fill(0);
+  const idsAt: Set<string>[] = Array.from({ length: H + 1 }, () => new Set<string>());
   for (const o of obs) {
     if (o.lead < 0 || o.lead > H) continue;
     sumB[o.lead] += o.b;
     sumE[o.lead] += o.e;
     cnt[o.lead] += 1;
+    idsAt[o.lead].add(o.id);
   }
   const raw: { x: number; y: number; w: number }[] = [];
   for (let L = 0; L <= H; L++) {
     let b = 0;
     let e = 0;
     let n = 0;
+    const ids = new Set<string>();
     for (let j = Math.max(0, L - 2); j <= Math.min(H, L + 2); j++) {
       b += sumB[j];
       e += sumE[j];
       n += cnt[j];
+      for (const id of idsAt[j]) ids.add(id);
     }
-    if (n > 0 && e > 0) raw.push({ x: L, y: (b / e) * 100, w: e });
+    // 1〜2物件の観測だけでは「市場の予約タイミング」にならない (1件の予約で 0%↔100% に振れる)
+    if (n > 0 && e > 0 && ids.size >= config.minUnitsForSignal) raw.push({ x: L, y: (b / e) * 100, w: e });
   }
   const fitted = isotonicNonIncreasing(raw).map((p) => ({ lead: p.x, occ: round1(p.y) }));
 
@@ -696,7 +702,8 @@ function buildCurve(type: NightType, obs: CurveObs[], config: PricingConfig): Bo
  * - points (散布図): 区分ごとに (宿泊日 d, lead を 3日刻みに丸めた L3 = 3·round(L/3)) で観測をまとめ、
  *   観測数 >= minUnitsForSignal の組だけ Σb/Σe×100 を1点に (lead = L3)。source は組の中に (2) 由来があれば
  *   "current"、無ければ "snapshot"。区分ごとに最大 400 点へ等間隔に間引く (sampleSize は間引き前)。
- * - fitted: L = 0..horizonDays ごとに lead が [L−2, L+2] の全観測をプールした Σb/Σe (重み Σe)。観測ゼロの L は除外。
+ * - fitted: L = 0..horizonDays ごとに lead が [L−2, L+2] の全観測をプールした Σb/Σe (重み Σe)。観測ゼロの L、
+ *   およびプールの物件数が minUnitsForSignal 未満の L は除外 (少数物件の曲線は市場の傾向にならない)。
  *   これを isotonicNonIncreasing (x=L, y=占有率, w=重み) で単調化し、occ を % 小数1桁に。
  * - reach50 / reach80: fitted で occ >= 50 (80) となる最大の lead (= 何日前までに到達しているか)。
  *   fitted の最小 lead の点が閾値未満なら null。
@@ -733,7 +740,7 @@ export function buildBookingCurves(
       if (currentKeys.has(key)) continue;
       currentKeys.add(key);
       const { b, e } = blockAdjusted(l.available, shareOf(r, l.id));
-      obs[typeOf(d)].push({ date: d, lead, b, e, current: true });
+      obs[typeOf(d)].push({ id: l.id, date: d, lead, b, e, current: true });
     }
   }
 
@@ -755,7 +762,7 @@ export function buildBookingCurves(
     if (seen.has(rowKey)) continue;
     seen.add(rowKey);
     const { b, e } = blockAdjusted(s.available, shareOf(r, s.propertyId));
-    obs[typeOf(s.date)].push({ date: s.date, lead, b, e, current: false });
+    obs[typeOf(s.date)].push({ id: s.propertyId, date: s.date, lead, b, e, current: false });
   }
 
   return {

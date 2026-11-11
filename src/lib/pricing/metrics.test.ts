@@ -528,8 +528,14 @@ test("buildBookingCurves: 観測数が minUnits 未満の組は点にしない /
   const few = buildBookingCurves(ms, [], market, cfg(), TODAY);
   assert.deepEqual(few.weekday.points, []);
   assert.equal(few.weekday.sampleSize, 0);
-  assert.equal(few.weekday.fitted.length, 5); // 点にならなくても曲線には使う
-  assert.equal(few.weekday.reach80, 22); // r=0.8 → 0.8/0.8 = 100%
+  // 1物件だけの観測では市場の予約曲線にしない (本番の初期状態で 1件の予約が「週末は12日前に100%」になっていた)
+  assert.deepEqual(few.weekday.fitted, []);
+  assert.equal(few.weekday.reach80, null);
+
+  (market.get(d) as MarketDay).listings = ms.map((m) => ({ id: m.id, available: false, price: null }));
+  const three = buildBookingCurves(ms, [], market, cfg(), TODAY);
+  assert.equal(three.weekday.fitted.length, 5); // lead 22 の ±2 日
+  assert.equal(three.weekday.reach80, 22); // r=0.8 → 0.8/0.8 = 100%
 
   const none = buildBookingCurves([], [], new Map(), cfg(), TODAY);
   assert.deepEqual(none.weekday, {

@@ -249,6 +249,30 @@ describe("computePricingDashboard (統合)", () => {
     assert.equal(d.kpis.lowerDays, 0);
     assert.ok(d.days.some((x) => x.pricing.changePct !== null), "乖離率自体は参考値として残る");
     assert.ok(!d.alerts.some((a) => a.kind === "raise_opportunity" || a.kind === "discount_needed"));
+    // ルールのみの推奨を「従うと得」と示さない
+    assert.equal(d.simulation.available, false);
+    assert.match(d.simulation.reason ?? "", /競合データが不足/);
+    // 1物件の観測は予約曲線にしない
+    assert.deepEqual(d.curves.weekday.fitted, []);
+    assert.deepEqual(d.curves.weekend.fitted, []);
+  });
+
+  it("AirROI の実価格が基準価格から大きくずれていれば基準価格の見直しを促す", () => {
+    const own = Array.from({ length: 61 }, (_, i) => ({
+      date: addDaysStr(TODAY, i),
+      apiPrice: 55000,
+      status: "vacant" as const,
+      statusSource: "api" as const,
+    }));
+    const base = buildInputs();
+    const d = computePricingDashboard({ ...base, own, lumina: { ...base.lumina, priceSource: "api" } }, NOW);
+    assert.ok(
+      d.status.warnings.some((w) => /平日中央値 ¥55,000）が基準価格 ¥110,000 と50%低く/.test(w)),
+      d.status.warnings.join("\n"),
+    );
+    const near = own.map((o) => ({ ...o, apiPrice: 100000 }));
+    const d2 = computePricingDashboard({ ...base, own: near, lumina: { ...base.lumina, priceSource: "api" } }, NOW);
+    assert.ok(!d2.status.warnings.some((w) => w.includes("平日中央値")));
   });
   it("CompSet が小さすぎるときは有料の取得ではなく条件の見直しを促す", () => {
     const candidates = [candidate(0), candidate(1)]; // 2件とも新鮮だが minUnitsForSignal 未満

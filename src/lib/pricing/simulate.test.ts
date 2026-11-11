@@ -55,6 +55,7 @@ function day(opts: {
   compAdr?: number | null;
   occ?: number;
   dataQuality?: MarketDay["dataQuality"];
+  signal?: DayRecommendation["pricing"]["signal"];
 }): DayRecommendation {
   const type = opts.type ?? "weekday";
   const status = opts.status ?? "vacant";
@@ -96,7 +97,7 @@ function day(opts: {
       clampedBy: null,
       changePct: null,
       action: status === "vacant" ? "hold" : status,
-      signal: "market",
+      signal: opts.signal ?? "market",
     },
   };
 }
@@ -300,6 +301,27 @@ describe("simulateRevenue", () => {
     const flat = { weekday: curve("weekday", [{ lead: 0, occ: 70 }, { lead: 30, occ: 70 }]), weekend: curve("weekend", []) };
     const s = simulateRevenue([day({ lead: 10 }), day({ lead: 12, date: "2026-11-22" })], flat, cfg);
     assert.ok(s.assumptions.some((a) => a.startsWith("2日は予約曲線上これ以上の予約が見込めない")));
+  });
+
+  it("推奨がルールのみの日 (競合データ不足) は比較しない。全日そうなら算出しない", () => {
+    const all = simulateRevenue(
+      [day({ lead: 10, recommended: 160000, signal: "rules_only" }), day({ lead: 12, date: "2026-11-22", recommended: 50000, signal: "rules_only" })],
+      curves,
+      cfg,
+    );
+    assert.equal(all.available, false);
+    assert.match(all.reason ?? "", /競合データが不足しているため算出していません/);
+    assert.deepEqual(all.breakEven, { raise: null, lower: null });
+
+    const mixed = simulateRevenue(
+      [day({ lead: 10, recommended: 120000 }), day({ lead: 12, date: "2026-11-22", recommended: 200000, signal: "rules_only" })],
+      curves,
+      cfg,
+    );
+    assert.equal(mixed.available, true);
+    assert.equal(mixed.vacantDays, 1);
+    assert.deepEqual(mixed.breakEven.raise, { days: 1, avgChangePct: 20, bookingChangePct: -16.7 });
+    assert.ok(mixed.assumptions.some((a) => a.includes("ルールのみの空室 1日は比較から除外")));
   });
 
   it("assumptions に必須の前提を含む", () => {

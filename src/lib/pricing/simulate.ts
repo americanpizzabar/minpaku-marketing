@@ -32,6 +32,8 @@
  *     baselineLabel "固定シーズン料金（基準価格×週末係数・仮定）" (仕様1章「固定シーズン料金に依存せず」の比較対象)
  * - own.status "booked" の日: lockedRevenue += currentPrice ?? typeBase (丸め)、bookedDays++ (比較対象外)
  * - "blocked" の日はスキップ
+ * - 推奨が曜日・直前ルールのみ (pricing.signal "rules_only" = 競合データ不足) の空室日は比較しない
+ *   (市場の根拠が無い推奨を「従うと得」と示さない。engine で値上げ/値下げ判定をしないのと同じ方針)
  * - 3シナリオ ε = cfg.elasticity.low/central/high。label: "価格感応度: 低" / "価格感応度: 中（標準）" / "価格感応度: 高"
  * - upliftPct = currentRevenue > 0 ? (recommendedRevenue − currentRevenue)/currentRevenue × 100 (小数1桁) : null
  * - 金額は整数円、泊数・%は小数1桁に丸める
@@ -156,6 +158,7 @@ export function simulateRevenue(
   let bookedDays = 0;
   let lockedRevenue = 0;
   let zeroPickupDays = 0;
+  let rulesOnlyDays = 0;
   const simDays: SimDay[] = [];
   for (const d of days) {
     const typeBase = typeBaseOf(d);
@@ -167,6 +170,10 @@ export function simulateRevenue(
       continue;
     }
     if (d.own.status !== "vacant") continue; // blocked
+    if (d.pricing.signal === "rules_only") {
+      rulesOnlyDays++;
+      continue;
+    }
     const curve = curveFor(d.night.type);
     if (!curve) continue;
     let basePriceForDay: number;
@@ -220,6 +227,9 @@ export function simulateRevenue(
     assumptions.push("現在価格が仮定値の空室日は比較から除外しています");
   }
 
+  if (rulesOnlyDays > 0) {
+    assumptions.push(`競合データ不足で推奨が曜日・直前ルールのみの空室 ${rulesOnlyDays}日は比較から除外しています`);
+  }
   if (zeroPickupDays > 0) {
     assumptions.push(
       `${zeroPickupDays}日は予約曲線上これ以上の予約が見込めない（曲線が平坦な）リードタイムのため、試算では売上0としています`,
@@ -237,7 +247,9 @@ export function simulateRevenue(
 
   if (simDays.length === 0) {
     let reason = "比較できる空室日がありません";
-    if (!hasCurve) reason = "予約曲線が未算出（競合カレンダー取得後に表示）";
+    if (rulesOnlyDays > 0 && rulesOnlyDays === vacant.length)
+      reason = "競合データが不足しているため算出していません（推奨が曜日・直前ルールのみの日は比較しません）";
+    else if (!hasCurve) reason = "予約曲線が未算出（競合カレンダー取得後に表示）";
     else if (vacant.length > 0 && !days.some((d) => typeBaseOf(d) > 0)) reason = "自社基準価格が未設定のため算出できません";
     return { available: false, reason, ...base, scenarios: [], central: null, breakEven: { raise: null, lower: null } };
   }

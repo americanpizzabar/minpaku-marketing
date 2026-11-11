@@ -142,7 +142,11 @@ export default function KpiSummary({
         {!d.status.paceAvailable ? (
           <p className="text-xs text-slate-400">
             Pace（予約の消化ペース）が未算出のため判定できません
-            {d.status.paceAvailableFrom ? `（${mdw(d.status.paceAvailableFrom)}以降の取得で算出）` : ""}
+            {!d.status.compsetAutoRefresh
+              ? "（競合の自動取得がオフのため）"
+              : d.status.paceAvailableFrom
+                ? `（${mdw(d.status.paceAvailableFrom)}以降の自動取得で算出）`
+                : ""}
           </p>
         ) : k.spikeDates.length === 0 ? (
           <p className="text-xs text-slate-400">直近7日で予約が急増した日はありません</p>

@@ -131,6 +131,49 @@ describe("refreshCompsetCalendars", () => {
     );
   });
 
+  it("取得前の確保は sync_state に記録し、取得試行日 (rates_synced_at) は API を呼ぶ前に動かさない", async () => {
+    const db = await freshDb();
+    const seed = await seedRealistic(db, { dailyRatesCalls: 5 });
+    // 取得前に試行日を進めると、中断時に「取得失敗」扱い (failed) になり30日間再取得されなくなる
+    const log: string[] = [];
+    const realExecute = db.execute.bind(db);
+    (db as unknown as { execute: typeof db.execute }).execute = (async (stmt: Parameters<typeof db.execute>[0]) => {
+      log.push(typeof stmt === "string" ? stmt : (stmt as { sql: string }).sql);
+      return realExecute(stmt);
+    }) as typeof db.execute;
+    const innerFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      log.push("FETCH");
+      return innerFetch(input, init);
+    }) as typeof fetch;
+    await refreshCompsetCalendars(db, { maxCalls: 1, staleDays: 1, ids: [seed.stale] });
+    (db as unknown as { execute: typeof db.execute }).execute = realExecute;
+    const firstFetch = log.indexOf("FETCH");
+    assert.ok(firstFetch > 0, "API を呼んでいる");
+    assert.ok(
+      !log.slice(0, firstFetch).some((q) => /UPDATE properties SET rates_synced_at/.test(q)),
+      "API を呼ぶ前に rates_synced_at を更新しない",
+    );
+    assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM sync_state WHERE key LIKE 'pricing:claim:%'")), 1);
+  });
+
+  it("物件の読み込みで例外が出ても、確保した日次の枠は差し戻す", async () => {
+    const db = await freshDb();
+    const seed = await seedRealistic(db, { dailyRatesCalls: 5 });
+    const realExecute = db.execute.bind(db);
+    (db as unknown as { execute: typeof db.execute }).execute = (async (stmt: Parameters<typeof db.execute>[0]) => {
+      const sql = typeof stmt === "string" ? stmt : (stmt as { sql: string }).sql;
+      if (sql.startsWith("SELECT id, airroi_id, max_guests FROM properties")) throw new Error("db busy");
+      return realExecute(stmt);
+    }) as typeof db.execute;
+    await assert.rejects(refreshCompsetCalendars(db, { maxCalls: 3, staleDays: 1 }), /db busy/);
+    (db as unknown as { execute: typeof db.execute }).execute = realExecute;
+    assert.equal(
+      await scalar(db, "SELECT value FROM sync_state WHERE key = ?", [`pricing:refresh_calls:${seed.today}`]),
+      "0",
+    );
+  });
+
   it("ids が与えられたら積集合だけ (CompSet 外・今日取得済みは取得しない)", async () => {
     const db = await freshDb();
     const seed = await seedRealistic(db);
@@ -372,6 +415,30 @@ describe("runPricingPipeline", () => {
       Number(await scalar(db, "SELECT COUNT(*) FROM pricing_alerts WHERE notified_at LIKE 'sending:%'")),
       0,
       "確保用の一時値が残らない",
+    );
+  });
+
+  it("送信中の一時値が残っていても、その状況の通知を止めない (前日以前の一時値は skipped に)", async () => {
+    const db = await freshDb();
+    const seed = await seedRealistic(db);
+    const [w1] = await forceWeekendAlerts(db, seed);
+    const today = seed.today;
+    // 前日に送信中のまま異常終了した行
+    await db.execute({
+      sql: `INSERT INTO pricing_alerts (generated_date, target_date, kind, severity, message, notified_at)
+            VALUES (?, ?, 'weekend_low_inventory', 'high', 'crashed', 'sending:1:abc')`,
+      args: [addDaysStr(today, -1), w1],
+    });
+    process.env.ALERT_WEBHOOK_URL = "https://hooks.example.invalid/x";
+    await runPricingPipeline(db, { notify: true });
+    const sentToday = await db.execute({
+      sql: "SELECT notified_at FROM pricing_alerts WHERE generated_date = ? AND target_date = ? AND kind = 'weekend_low_inventory'",
+      args: [today, w1],
+    });
+    assert.ok(sentToday.rows[0]?.notified_at && sentToday.rows[0].notified_at !== null, "一時値を送信済みとみなさない");
+    assert.equal(
+      await scalar(db, "SELECT notified_at FROM pricing_alerts WHERE message = 'crashed'"),
+      "skipped",
     );
   });
 

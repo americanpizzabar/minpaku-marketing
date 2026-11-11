@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { matchesCronSecret } from "@/lib/cron-auth";
 import { refreshOneListing, runChunkedSync } from "@/lib/sync-runner";
 
 export const dynamic = "force-dynamic";
@@ -11,8 +12,7 @@ export const maxDuration = 300;
  * - `cap=<n|none>`: チェーン継続用の残り呼び出し上限
  */
 export async function GET(request: NextRequest) {
-  const secret = process.env.CRON_SECRET;
-  if (!secret || request.nextUrl.searchParams.get("key") !== secret) {
+  if (!matchesCronSecret(request.nextUrl.searchParams.get("key"))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

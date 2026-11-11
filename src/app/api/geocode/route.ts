@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { matchesCronSecret } from "@/lib/cron-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -8,8 +9,7 @@ export const dynamic = "force-dynamic";
  * CRON_SECRET をクエリ `key` に指定した場合のみ実行可能。
  */
 export async function GET(request: NextRequest) {
-  const secret = process.env.CRON_SECRET;
-  if (!secret || request.nextUrl.searchParams.get("key") !== secret) {
+  if (!matchesCronSecret(request.nextUrl.searchParams.get("key"))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

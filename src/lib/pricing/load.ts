@@ -121,6 +121,7 @@ async function loadContext(db: Client): Promise<LoadContext> {
  * - icalLastImport = sync_state "pricing:ical_last_import" の JSON (IcalImportStatus)。無ければ null
  * - alertChannel = process.env.ALERT_WEBHOOK_URL が空でなければ "webhook"、それ以外 "none"
  * - lastNotifiedAt = SELECT MAX(notified_at) FROM pricing_alerts WHERE notified_at IS NOT NULL AND notified_at <> 'skipped'
+ *   (送信中の一時値 'sending:…' は除く)
  * 大量の IN 句は 400 件ずつに分割してよい。
  */
 export async function loadPricingInputs(db: Client | null = getDb()): Promise<PricingInputs> {
@@ -216,7 +217,7 @@ export async function loadPricingInputs(db: Client | null = getDb()): Promise<Pr
     db.execute({ sql: "SELECT value FROM sync_state WHERE key = ?", args: [ICAL_LAST_IMPORT_KEY] }),
     db.execute(
       `SELECT MAX(notified_at) AS m FROM pricing_alerts
-       WHERE notified_at IS NOT NULL AND notified_at <> 'skipped'`,
+       WHERE notified_at IS NOT NULL AND notified_at <> 'skipped' AND notified_at NOT LIKE 'sending:%'`,
     ),
   ]);
   const own = buildOwnDays(ownFrom, ownTo, lumina.priceSource, metricsRes.rows, bookingsRes.rows);

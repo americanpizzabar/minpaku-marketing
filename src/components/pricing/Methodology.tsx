@@ -22,7 +22,7 @@ export default function Methodology() {
         <section>
           <h4 className="font-bold text-slate-800">競合セット（CompSet）</h4>
           <p className="mt-1">
-            半径 7km・一棟貸し・ADR ±30%・定員 6〜10名・評価 4.7以上・レビュー 5件以上。実データでは厳格条件で数件にとどまるため、
+            半径 7km・一棟貸し・参照ADRが自社基準価格の ±30%・定員 6〜10名・評価 4.7以上・レビュー 5件以上。実データでは厳格条件で数件にとどまるため、
             最小件数を下回ると ADR帯 → 定員 → 評価/レビュー の順に段階的に緩和し、緩和内容を表示します。一棟貸しは AirROI の room_type で判定します。
           </p>
         </section>

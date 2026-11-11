@@ -355,7 +355,8 @@ export function resolveGuardrails(
 
 /**
  * 1日分の推奨価格。
- * δ = deltaCoef(night, premium), α = alphaCoef, β = betaCoef, γ = gammaCoef(lead, night, ownStatus, market.occ, cfg)
+ * δ = deltaCoef(night, premium), α = alphaCoef, β = betaCoef,
+ * γ = gammaCoef(lead, night, ownStatus, dataQuality == "ok" ? market.occ : null, cfg)
  * rawPrice = round(basePrice × (1+δ)(1+α)(1+β)(1+γ))
  * recommended = clamp(round(rawPrice / roundTo) × roundTo, floor, ceiling)
  * clampedBy = round(rawPrice/roundTo)×roundTo が floor 未満なら "floor"、ceiling 超なら "ceiling"、それ以外 null
@@ -384,7 +385,8 @@ export function priceDay(args: {
   const delta = deltaCoef(night, premium);
   const alpha = alphaCoef(market, lead, night, cfg);
   const beta = betaCoef(market, lead, night, cfg);
-  const gamma = gammaCoef(lead, night, ownStatus, market.occ, cfg);
+  // 占有率が使えない日 (データ不足) は γ の逼迫補正・先行高値にも使わない (α・β と同じ基準。ルールのみの推奨を1物件の状態で動かさない)
+  const gamma = gammaCoef(lead, night, ownStatus, market.dataQuality === "ok" ? market.occ : null, cfg);
   const product = basePrice * (1 + delta.value) * (1 + alpha.value) * (1 + beta.value) * (1 + gamma.value);
   const rawPrice = Number.isFinite(product) ? Math.max(0, Math.round(product)) : 0;
   const unit = cfg.roundTo > 0 ? cfg.roundTo : 1;

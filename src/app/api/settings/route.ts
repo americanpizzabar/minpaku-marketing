@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { matchesCronSecret } from "@/lib/cron-auth";
 import {
   getSyncConfig,
   refreshLuminaRates,
@@ -26,8 +27,7 @@ export async function GET(request: NextRequest) {
   await ensureSchema(db);
 
   const params = request.nextUrl.searchParams;
-  const secret = process.env.CRON_SECRET;
-  if (secret && params.get("key") === secret) {
+  if (matchesCronSecret(params.get("key"))) {
     const numParam = (name: string, min: number, max: number): number | undefined => {
       const v = params.get(name);
       if (v === null || v === "") return undefined;

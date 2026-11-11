@@ -297,6 +297,12 @@ describe("simulateRevenue", () => {
     assert.equal(low.central!.currentRevenue, 60000);
   });
 
+  it("競合が満室 (占有率100%) でも市場がまだ埋まる局面なら成約確率は上限 (0にしない)", () => {
+    const s = simulateRevenue([day({ lead: 10, occ: 100 })], curves, cfg);
+    assert.equal(s.central!.currentRevenue, 95000);
+    assert.ok(!s.assumptions.some((a) => a.includes("曲線が平坦")));
+  });
+
   it("曲線が平坦で成約確率 0 の日があれば前提に明記する", () => {
     const flat = { weekday: curve("weekday", [{ lead: 0, occ: 70 }, { lead: 30, occ: 70 }]), weekend: curve("weekend", []) };
     const s = simulateRevenue([day({ lead: 10 }), day({ lead: 12, date: "2026-11-22" })], flat, cfg);

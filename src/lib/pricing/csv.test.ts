@@ -41,6 +41,7 @@ function day(
     currentPrice?: number | null;
     clampedBy?: "floor" | "ceiling" | null;
     market?: Partial<MarketDay>;
+    signal?: DayRecommendation["pricing"]["signal"];
   } = {},
 ): DayRecommendation {
   const type = opts.type ?? "weekday";
@@ -79,7 +80,7 @@ function day(
       clampedBy: opts.clampedBy ?? null,
       changePct: 12.3,
       action: status === "vacant" ? "raise" : status,
-      signal: "partial",
+      signal: opts.signal ?? "partial",
     },
   };
 }
@@ -166,6 +167,15 @@ describe("toPriceCsv", () => {
   it("空なら header のみ", () => {
     assert.equal(toPriceCsv(dash([])), "date,price,currency,day_type,min_nights\n");
   });
+  it("競合データ不足でルールのみの推奨の日は取込用ファイルに入れない", () => {
+    const csv = toPriceCsv(
+      dash([
+        day("2026-11-14", 4, { recommended: 127000, signal: "rules_only" }),
+        day("2026-11-17", 7, { recommended: 98000, signal: "market" }),
+      ]),
+    );
+    assert.equal(csv, "date,price,currency,day_type,min_nights\n2026-11-17,98000,JPY,weekday,\n");
+  });
 });
 
 describe("toPriceRanges", () => {
@@ -193,6 +203,22 @@ describe("toPriceRanges", () => {
     );
     assert.equal(r[0].label, "11/13(金)〜11/14(土) ¥127,000（2泊）");
     assert.equal(r[3].label, "11/18(水) ¥98,000");
+  });
+  it("ルールのみの日は参考区間として分け、根拠の違う日とはまとめない", () => {
+    const r = toPriceRanges(
+      dash([
+        day("2026-11-13", 3, { recommended: 110000, signal: "market" }),
+        day("2026-11-14", 4, { recommended: 110000, signal: "rules_only" }),
+        day("2026-11-15", 5, { recommended: 110000, signal: "rules_only" }),
+      ]),
+    );
+    assert.deepEqual(
+      r.map((x) => [x.from, x.to, x.nights, x.rulesOnly]),
+      [
+        ["2026-11-13", "2026-11-13", 1, false],
+        ["2026-11-14", "2026-11-15", 2, true],
+      ],
+    );
   });
   it("空入力は空配列", () => {
     assert.deepEqual(toPriceRanges(dash([])), []);

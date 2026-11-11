@@ -122,11 +122,13 @@ export function toDetailCsv(d: PricingDashboard): string {
 /**
  * 汎用の価格CSV (チャネルマネージャ等への取込用。UTF-8, BOM なし, 改行 \n)。
  * ヘッダ: date,price,currency,day_type,min_nights
- * 行: 自社が vacant の将来日のみ、price = 推奨価格 (整数), currency = JPY, day_type = weekday/weekend, min_nights = 空欄
+ * 行: 自社が vacant の将来日のうち、推奨が競合データに基づく日 (signal != "rules_only") のみ。
+ *     price = 推奨価格 (整数), currency = JPY, day_type = weekday/weekend, min_nights = 空欄
+ *     (競合データ不足でルールのみの推奨は判定も据え置きにしているため、取込用ファイルには入れない。詳細CSVには全日を出す)
  */
 export function toPriceCsv(d: PricingDashboard): string {
   const lines = ["date,price,currency,day_type,min_nights"];
-  for (const x of vacantFutureDays(d)) {
+  for (const x of vacantFutureDays(d).filter((v) => v.pricing.signal !== "rules_only")) {
     const price = Number.isFinite(x.pricing.recommended) ? Math.round(x.pricing.recommended) : 0;
     lines.push(`${x.date},${price},JPY,${x.night.type},`);
   }
@@ -134,21 +136,23 @@ export function toPriceCsv(d: PricingDashboard): string {
 }
 
 /**
- * 自社が vacant の将来日を日付順に並べ、連続する日 (翌日が vacant かつ同じ推奨価格) を1区間にまとめる。
+ * 自社が vacant の将来日を日付順に並べ、連続する日 (翌日が vacant かつ同じ推奨価格かつ同じ根拠) を1区間にまとめる。
+ * rulesOnly = 推奨が競合データ不足で曜日・直前ルールのみ (signal "rules_only") の区間 (参考値。入力対象ではない)。
  * 戻り値の label 例: "11/14(金)〜11/15(土) ¥127,000（2泊）"、単日は "11/18(水) ¥98,000"
  */
 export function toPriceRanges(
   d: PricingDashboard,
-): { from: string; to: string; price: number; nights: number; label: string }[] {
-  const ranges: { from: string; to: string; price: number; nights: number }[] = [];
+): { from: string; to: string; price: number; nights: number; rulesOnly: boolean; label: string }[] {
+  const ranges: { from: string; to: string; price: number; nights: number; rulesOnly: boolean }[] = [];
   for (const x of vacantFutureDays(d)) {
     const price = Number.isFinite(x.pricing.recommended) ? Math.round(x.pricing.recommended) : 0;
+    const rulesOnly = x.pricing.signal === "rules_only";
     const last = ranges[ranges.length - 1];
-    if (last && last.price === price && addDaysStr(last.to, 1) === x.date) {
+    if (last && last.price === price && last.rulesOnly === rulesOnly && addDaysStr(last.to, 1) === x.date) {
       last.to = x.date;
       last.nights++;
     } else {
-      ranges.push({ from: x.date, to: x.date, price, nights: 1 });
+      ranges.push({ from: x.date, to: x.date, price, nights: 1, rulesOnly });
     }
   }
   return ranges.map((r) => ({

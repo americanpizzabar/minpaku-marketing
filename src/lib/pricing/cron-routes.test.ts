@@ -114,3 +114,37 @@ describe("cron", () => {
     assert.equal(body.notified, 0);
   });
 });
+
+describe("cron-auth (CRON_SECRET の比較)", () => {
+  const env = process.env.CRON_SECRET;
+  afterEach(() => {
+    if (env === undefined) delete process.env.CRON_SECRET;
+    else process.env.CRON_SECRET = env;
+  });
+
+  it("生の値と、空白・引用符を除いた値の両方を受け付ける", async () => {
+    const { hasCronBearer, isCronAuthorized, matchesCronSecret } = await import("../cron-auth");
+    process.env.CRON_SECRET = ' "s3cret" ';
+    assert.equal(hasCronBearer('Bearer  "s3cret" '), true);
+    assert.equal(hasCronBearer("Bearer s3cret"), true);
+    assert.equal(matchesCronSecret("s3cret"), true);
+    assert.equal(hasCronBearer("Bearer other"), false);
+    assert.equal(isCronAuthorized("Bearer other"), false);
+    assert.equal(isCronAuthorized(null), false);
+  });
+
+  it("空や引用符だけの CRON_SECRET は秘密として一致させない (Basic 認証の迂回に使えない)", async () => {
+    const { hasCronBearer, isCronAuthorized, matchesCronSecret } = await import("../cron-auth");
+    for (const v of ['""', "''", " ", '" "']) {
+      process.env.CRON_SECRET = v;
+      assert.equal(hasCronBearer(`Bearer ${v}`), false, JSON.stringify(v));
+      assert.equal(hasCronBearer("Bearer "), false);
+      assert.equal(matchesCronSecret(v), false);
+      // cron ルートは未設定と同じ扱い (従来どおり)
+      assert.equal(isCronAuthorized(null), true);
+    }
+    delete process.env.CRON_SECRET;
+    assert.equal(hasCronBearer("Bearer undefined"), false);
+    assert.equal(isCronAuthorized(null), true);
+  });
+});

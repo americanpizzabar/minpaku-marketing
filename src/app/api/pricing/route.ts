@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { hasCronBearer } from "@/lib/cron-auth";
+import { publicErrorMessage } from "@/lib/errors";
 import { toDateStr, todayJst } from "@/lib/dates";
 import { ensureSchema, getDb } from "@/lib/db";
 import { getPricingDashboard } from "@/lib/pricing";
@@ -165,7 +166,8 @@ export async function POST(request: NextRequest) {
             imported: r.imported,
           });
         } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
+          console.error("importIcal failed:", err);
+          const message = publicErrorMessage(err, "内部エラー（詳細はサーバーログ）");
           return reply({ ok: false, message: `iCal取り込みに失敗しました: ${message}`, imported: 0 }, 502);
         }
       }
@@ -185,12 +187,8 @@ export async function POST(request: NextRequest) {
     }
   } catch (err) {
     console.error("POST /api/pricing failed:", err);
-    const message = err instanceof Error ? err.message : String(err);
-    // 自前の日本語エラー (iCal の取得失敗など) はそのまま見せ、DB 等の内部エラー文は返さない
-    const userFacing = /[\u3040-\u30ff\u4e00-\u9fff]/.test(message);
-    return reply(
-      { ok: false, message: userFacing ? `処理に失敗しました: ${message}` : "処理に失敗しました（詳細はサーバーログ）" },
-      500,
-    );
+    // 自前の日本語エラーはそのまま見せ、DB 等の内部エラー文は返さない
+    const message = publicErrorMessage(err, "");
+    return reply({ ok: false, message: message ? `処理に失敗しました: ${message}` : "処理に失敗しました（詳細はサーバーログ）" }, 500);
   }
 }

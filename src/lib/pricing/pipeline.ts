@@ -21,6 +21,7 @@ const WEBHOOK_TIMEOUT_MS = 10_000;
 const WEBHOOK_MAX_ALERTS = 20;
 const NOTIFY_KINDS = ["weekend_low_inventory", "weekday_spike"] as const;
 const REFRESH_COUNTER_PREFIX = "pricing:refresh_calls:";
+const CLAIM_PREFIX = "pricing:claim:";
 
 function cleanEnv(value: string | undefined): string | undefined {
   if (!value) return undefined;
@@ -50,8 +51,10 @@ function severityRank(s: string): number {
  * - 1日あたりの上限: sync_state "pricing:refresh_calls:{今日JST}" の累計 + 対象数 が dailyRatesCalls を超える分は取得しない。
  *   並行実行 (cron の二重配信・ボタンの同時押し) でも上限を超えないよう、取得前に予定件数を条件付き UPSERT で
  *   原子的に確保し、終了後に使わなかった分を差し戻す (絶対値で上書きしない)
- * - 各物件は取得前に properties.rates_synced_at を「今日 (JST) 未試行なら現在時刻に」更新して確保し、
- *   更新できなかった (別の実行が今日すでに試行した) 物件は取得しない (同じ物件を二重に課金しない)
+ * - 各物件は取得前に sync_state の "pricing:claim:{今日JST}:{id}" を INSERT OR IGNORE で確保し、
+ *   確保できなかった (別の実行が今日すでに取得した/取得中の) 物件は取得しない (同じ物件を二重に課金しない)。
+ *   取得試行日 (rates_synced_at) は取得処理 (refreshRatesForProperty) が記録するので、途中で中断しても
+ *   「取得失敗」扱いにはならず、翌日以降に再取得できる。確保の記録は7日で掃除する
  * - 各 id について airroi.ts の refreshRatesForProperty を呼ぶ (内部でスナップショットも保存される)。
  *   5件ずつ並列、合計 200 秒 (opts.deadline があればその時刻まで) を超えたら打ち切り
  * - 実行後、sync_logs に (sync_type 'pricing_compset', records_fetched, api_calls_count, status) を記録
@@ -123,12 +126,11 @@ export async function refreshCompsetCalendars(
           args: [unused, counterKey],
         })
       : Promise.resolve();
-  /** 物件を「今日試行済み」にして確保する。別の実行が今日すでに試行していれば false */
+  /** 物件を今日の取得対象として確保する。別の実行が今日すでに確保していれば false */
   const claimProperty = async (id: string): Promise<boolean> => {
     const res = await db.execute({
-      sql: `UPDATE properties SET rates_synced_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND (rates_synced_at IS NULL OR date(rates_synced_at, '+9 hours') < ?)`,
-      args: [id, today],
+      sql: "INSERT OR IGNORE INTO sync_state (key, value) VALUES (?, CURRENT_TIMESTAMP)",
+      args: [`${CLAIM_PREFIX}${today}:${id}`],
     });
     return res.rowsAffected > 0;
   };
@@ -140,19 +142,20 @@ export async function refreshCompsetCalendars(
   let records = 0;
   let failed = 0; // 取得できなかった件数 (refreshRatesForProperty は取得失敗を内部で握りつぶし 0 件を返す)
   let errorMessage: string | null = null;
-  if (planned.length > 0) {
-    const propRes = await db.execute({
-      sql: `SELECT id, airroi_id, max_guests FROM properties WHERE id IN (${planned.map(() => "?").join(",")})`,
-      args: planned,
-    });
-    const props = new Map(
-      propRes.rows.map((r) => [
-        String(r.id),
-        { id: String(r.id), airroiId: String(r.airroi_id), maxGuests: Number(r.max_guests) || 1 },
-      ]),
-    );
-    const queue = planned.map((id) => props.get(id)).filter((p): p is NonNullable<typeof p> => p !== undefined);
-    try {
+  // 確保した枠は、途中で例外が出ても使わなかった分を必ず差し戻す
+  try {
+    if (planned.length > 0) {
+      const propRes = await db.execute({
+        sql: `SELECT id, airroi_id, max_guests FROM properties WHERE id IN (${planned.map(() => "?").join(",")})`,
+        args: planned,
+      });
+      const props = new Map(
+        propRes.rows.map((r) => [
+          String(r.id),
+          { id: String(r.id), airroiId: String(r.airroi_id), maxGuests: Number(r.max_guests) || 1 },
+        ]),
+      );
+      const queue = planned.map((id) => props.get(id)).filter((p): p is NonNullable<typeof p> => p !== undefined);
       for (let i = 0; i < queue.length; i += REFRESH_CONCURRENCY) {
         if (Date.now() > stopAt) break;
         const candidates = queue.slice(i, i + REFRESH_CONCURRENCY);
@@ -172,9 +175,9 @@ export async function refreshCompsetCalendars(
           }
         }
       }
-    } finally {
-      await refund(claimed - refreshed).catch(() => {});
     }
+  } finally {
+    await refund(claimed - refreshed).catch((err) => console.error("CompSet budget refund failed:", err));
   }
 
   const skipped = eligible.length - refreshed;
@@ -191,11 +194,17 @@ export async function refreshCompsetCalendars(
       args: [records, refreshed, status, message],
     })
     .catch(() => {});
-  // 古い日次カウンタを掃除する
+  // 古い日次カウンタ・物件の確保記録を掃除する
   await db
     .execute({
       sql: "DELETE FROM sync_state WHERE key LIKE 'pricing:refresh_calls:%' AND key < ?",
       args: [`${REFRESH_COUNTER_PREFIX}${addDaysStr(today, -7)}`],
+    })
+    .catch(() => {});
+  await db
+    .execute({
+      sql: "DELETE FROM sync_state WHERE key LIKE 'pricing:claim:%' AND key < ?",
+      args: [`${CLAIM_PREFIX}${addDaysStr(today, -7)}`],
     })
     .catch(() => {});
 
@@ -337,7 +346,7 @@ export async function runPricingPipeline(
     const prevRes = await db.execute({
       sql: `SELECT target_date, kind, severity FROM pricing_alerts
             WHERE generated_date < ? AND target_date >= ?
-              AND notified_at IS NOT NULL AND notified_at <> 'skipped'
+              AND notified_at IS NOT NULL AND notified_at <> 'skipped' AND notified_at NOT LIKE 'sending:%'
               AND kind IN (${kinds})`,
       args: [today, today, ...NOTIFY_KINDS],
     });
@@ -351,42 +360,46 @@ export async function runPricingPipeline(
       return prev === undefined || severityRank(String(r.severity)) > prev;
     });
     if (targets.length > 0) {
+      // 1通に載せられる件数だけを対象にする (載らない分は未通知のまま残し、印を付けない)
+      const batch = targets.slice(0, WEBHOOK_MAX_ALERTS);
       // 並行実行 (cron の二重配信など) で同じ通知を2回送らないよう、送信前に行を原子的に確保する
       const token = `sending:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
-      const ids = targets.map((r) => Number(r.id));
+      const ids = batch.map((r) => Number(r.id));
+      let sent = false;
       await db.execute({
         sql: `UPDATE pricing_alerts SET notified_at = ?
               WHERE id IN (${ids.map(() => "?").join(",")}) AND notified_at IS NULL`,
         args: [token, ...ids],
       });
-      const claimedRes = await db.execute({
-        sql: "SELECT id FROM pricing_alerts WHERE notified_at = ?",
-        args: [token],
-      });
-      const claimedIds = new Set(claimedRes.rows.map((r) => Number(r.id)));
-      const mine = targets.filter((r) => claimedIds.has(Number(r.id)));
-      if (mine.length > 0) {
-        const alerts: PricingAlert[] = mine.map((r) => ({
-          date: String(r.target_date),
-          kind: String(r.kind) as PricingAlert["kind"],
-          severity: String(r.severity) as PricingAlert["severity"],
-          message: String(r.message),
-        }));
-        let sent = false;
-        try {
+      try {
+        const claimedRes = await db.execute({
+          sql: "SELECT id FROM pricing_alerts WHERE notified_at = ?",
+          args: [token],
+        });
+        const claimedIds = new Set(claimedRes.rows.map((r) => Number(r.id)));
+        const mine = batch.filter((r) => claimedIds.has(Number(r.id)));
+        if (mine.length > 0) {
+          const alerts: PricingAlert[] = mine.map((r) => ({
+            date: String(r.target_date),
+            kind: String(r.kind) as PricingAlert["kind"],
+            severity: String(r.severity) as PricingAlert["severity"],
+            message: String(r.message),
+          }));
           sent = await sendAlertWebhook(alerts);
-        } finally {
-          await db.execute({
-            // 送れなかったら未通知に戻して次回に再送できるようにする
-            sql: `UPDATE pricing_alerts SET notified_at = ${sent ? "CURRENT_TIMESTAMP" : "NULL"} WHERE notified_at = ?`,
-            args: [token],
-          });
+          if (sent) notified = mine.length;
         }
-        if (sent) notified = mine.length;
+      } finally {
+        // 送れなかった (例外を含む) ら未通知に戻して次回に再送できるようにする
+        await db.execute({
+          sql: `UPDATE pricing_alerts SET notified_at = ${sent ? "CURRENT_TIMESTAMP" : "NULL"} WHERE notified_at = ?`,
+          args: [token],
+        });
       }
     }
+    // 前日以前の未通知 (と、異常終了で残った送信中の一時値) は送らずに締める
     await db.execute({
-      sql: "UPDATE pricing_alerts SET notified_at = 'skipped' WHERE generated_date < ? AND notified_at IS NULL",
+      sql: `UPDATE pricing_alerts SET notified_at = 'skipped'
+            WHERE generated_date < ? AND (notified_at IS NULL OR notified_at LIKE 'sending:%')`,
       args: [today],
     });
   }

@@ -3,6 +3,7 @@
  * 仕様 4.1 のタイムライン行1「自社ステータス（予約済 / 空室）」を AirROI 未収録でも埋めるため。
  */
 import type { Client, InStatement } from "@libsql/client";
+import { isUserFacingMessage } from "../errors";
 import { isAllowedIcalUrl } from "./config";
 import { addDaysStr } from "./holidays";
 import type { IcalImportStatus } from "./types";
@@ -129,13 +130,20 @@ function importStatusStmt(status: IcalImportStatus): InStatement {
 }
 
 const MAX_ICAL_BYTES = 2 * 1024 * 1024;
+const TOO_LARGE = "iCalのサイズが大きすぎます（2MB超）";
+
+class IcalTooLargeError extends Error {
+  constructor() {
+    super(TOO_LARGE);
+  }
+}
 const MAX_REDIRECTS = 3;
 
 /** 本文を最大 MAX_ICAL_BYTES まで読む (巨大な応答でメモリを使い切らない) */
 async function readCapped(res: Response): Promise<string> {
   const declared = Number(res.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > MAX_ICAL_BYTES) {
-    throw new Error("iCalのサイズが大きすぎます（2MB超）");
+    throw new IcalTooLargeError();
   }
   if (!res.body) return await res.text();
   const reader = res.body.getReader();
@@ -147,7 +155,7 @@ async function readCapped(res: Response): Promise<string> {
     total += value.byteLength;
     if (total > MAX_ICAL_BYTES) {
       await reader.cancel().catch(() => {});
-      throw new Error("iCalのサイズが大きすぎます（2MB超）");
+      throw new IcalTooLargeError();
     }
     chunks.push(value);
   }
@@ -196,7 +204,14 @@ async function fetchIcalText(url: string): Promise<string> {
         continue;
       }
       if (!res.ok) throw new Error(`iCalの取得に失敗しました（HTTP ${res.status}）`);
-      return await readCapped(res);
+      try {
+        return await readCapped(res);
+      } catch (err) {
+        if (err instanceof IcalTooLargeError) throw err;
+        // 本文の読み込み中のタイムアウトも日本語のメッセージにする
+        const aborted = controller.signal.aborted || (err instanceof Error && err.name === "AbortError");
+        throw new Error(aborted ? "iCalの取得がタイムアウトしました（15秒）" : "iCalの取得に失敗しました（通信エラー）");
+      }
     }
   } finally {
     clearTimeout(timer);
@@ -278,7 +293,14 @@ export async function importIcalToDb(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     try {
-      await recordImportStatus(db, { at, ok: false, imported: 0, error: message });
+      // 画面に出す記録には DB 等の内部エラー文を残さない (詳細はサーバーログ)
+      if (!isUserFacingMessage(message)) console.error("iCal import failed:", err);
+      await recordImportStatus(db, {
+        at,
+        ok: false,
+        imported: 0,
+        error: isUserFacingMessage(message) ? message : "内部エラー（詳細はサーバーログ）",
+      });
     } catch {
       // 記録の失敗は元のエラーを優先する
     }

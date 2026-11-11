@@ -59,13 +59,28 @@ export function StatusBanner({ d, api }: { d: PricingDashboard; api: PricingActi
   if (status.mode === "no_market_data") {
     const plan = status.refreshPlan;
     const members = d.compset.members.length;
+    const reachable = d.compset.members.filter((m) => m.calendarStatus !== "failed").length;
     const min = d.config.minUnitsForSignal;
-    if (members < min) {
-      // CompSet が小さすぎる場合はカレンダーを取得しても競合連動にならない (有料の取得を勧めない)
+    if (reachable < min) {
+      // CompSet が小さすぎる (取得失敗を除く) 場合はカレンダーを取得しても競合連動にならない (有料の取得を勧めない)
       return (
         <div className="rounded-xl border border-amber-400 bg-amber-50 px-3 py-3 text-xs leading-relaxed text-amber-900">
-          CompSet が{members}件で、競合連動に必要な{min}件に足りないため、現在の推奨は『曜日・直前ルールのみ』です。
-          下の「エンジン設定」で CompSet の条件（半径・価格帯など）を広げてください。
+          CompSet で取得できる競合が{reachable}件
+          {reachable < members ? `（全${members}件中${members - reachable}件は取得失敗）` : ""}で、競合連動に必要な{min}
+          件に足りないため、現在の推奨は『曜日・直前ルールのみ』です。下の「エンジン設定」で CompSet の条件（半径・価格帯など）を広げてください。
+        </div>
+      );
+    }
+    if (status.freshMembers >= min) {
+      // 取得済みのカレンダーはあるが、対象期間の日付を十分にカバーしていない (取得から日数が経っている等)
+      return (
+        <div className="space-y-2 rounded-xl border border-amber-400 bg-amber-50 px-3 py-3 text-xs text-amber-900">
+          <p className="leading-relaxed">
+            取得済みの競合カレンダー（{status.freshMembers}件）が対象期間の日付を{min}件以上カバーしていないため、現在の推奨は『曜日・直前ルールのみ』です。
+            {plan.count > 0 ? `未取得/古い${plan.count}件を取得（約${usd(plan.costUsd)}）すると改善する可能性があります。` : ""}
+          </p>
+          {plan.count > 0 && <RefreshButton d={d} api={api} onResult={setResult} />}
+          {result && <p className="rounded-lg bg-white px-2 py-1.5 text-slate-700">{result}</p>}
         </div>
       );
     }
@@ -77,6 +92,12 @@ export function StatusBanner({ d, api }: { d: PricingDashboard; api: PricingActi
             ? `競合カレンダーを取得（${plan.count}件・約${usd(plan.costUsd)}）すると競合連動になります。`
             : "取得対象の競合がありません（CompSet 条件を設定で見直してください）。"}
         </p>
+        {plan.count > 0 && status.basePriceGapPct != null && (
+          <p className="rounded-lg bg-white/70 px-2 py-1.5 leading-relaxed">
+            ⚠ 基準価格が AirROI 上の実際の販売価格と{Math.abs(status.basePriceGapPct)}%ずれています。CompSet は基準価格の
+            ±{d.config.compset.adrBandPct}%の価格帯で選ばれるため、取得の前に「エンジン設定」で基準価格を確認してください。
+          </p>
+        )}
         <RefreshButton d={d} api={api} onResult={setResult} />
         {result && <p className="rounded-lg bg-white px-2 py-1.5 text-slate-700">{result}</p>}
       </div>
@@ -124,9 +145,11 @@ export function DataStatusBar({ d, api }: { d: PricingDashboard; api: PricingAct
         <Item label="Pace">
           {status.paceAvailable
             ? `算出済み${status.paceWindowDays != null ? `（${Math.round(status.paceWindowDays)}日間隔）` : ""}`
-            : status.paceAvailableFrom
-              ? `${md(status.paceAvailableFrom)} から`
-              : "未算出"}
+            : !status.compsetAutoRefresh
+              ? "未算出（自動取得オフ）"
+              : status.paceAvailableFrom
+                ? `${md(status.paceAvailableFrom)} から`
+                : "未算出"}
         </Item>
         <Item label="自社予約の出所">
           {OWN_STATUS_SOURCE_LABEL[status.ownStatusSource]}

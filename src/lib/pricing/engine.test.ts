@@ -345,6 +345,18 @@ describe("priceDay", () => {
       assert.equal(r.action, "hold");
     }
   });
+  it("データ不足の日は γ に競合占有率を使わない (直前値下げは満額・早期は割引のまま)", () => {
+    const low = market({ occ: 100, dataQuality: "low", units: 1, pace: null });
+    const last = priceDay({ ...base, lead: 0, night: WD, market: low, ownStatus: "vacant" });
+    assert.equal(last.gamma.value, -0.25);
+    assert.doesNotMatch(last.gamma.reason, /占有率/);
+    const early = priceDay({ ...base, lead: 55, night: WD, market: low, ownStatus: "vacant" });
+    assert.equal(early.gamma.value, -0.05);
+    assert.doesNotMatch(early.gamma.reason, /占有率/);
+    // データが十分なら従来どおり逼迫で縮小
+    const ok = priceDay({ ...base, lead: 0, night: WD, market: market({ occ: 100, pace: null }), ownStatus: "vacant" });
+    assert.equal(ok.gamma.value, 0);
+  });
   it("閾値 0 でも乖離 0 は hold (値上げ扱いにしない)", () => {
     const c0 = { ...cfg, alerts: { ...cfg.alerts, changePct: 0 } };
     const r = priceDay({ ...base, cfg: c0, currentPrice: priceDay({ ...base, cfg: c0 }).recommended, currentPriceSource: "manual" });

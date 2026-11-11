@@ -16,7 +16,8 @@
  *   残り在庫の成約確率 (条件付きピックアップ):
  *     市場がこれから埋める量 Δ = F0 − F(L) を、その日の競合の残り在庫 (1 − 現在の占有率) で割る。
  *     q = clamp(Δ / (1 − occNow), 0, 0.95)   occNow = その日の競合占有率 (dataQuality "ok" の日のみ。無ければ F(L))
- *     → 競合が埋まっている日ほど残りの部屋が予約されやすい (逼迫を反映)。曲線が平坦 (Δ=0) なら q=0
+ *     → 競合が埋まっている日ほど残りの部屋が予約されやすい (逼迫を反映)。曲線が平坦 (Δ<=0) なら q=0、
+ *       Δ>0 で競合が満室 (occNow=1) なら q=0.95
  *   品質調整した参照価格: typeBase = basePrice × (1 + δ) (pricing.delta.value)
  *     ref = market.compAdr != null かつ 区分の compAdr 中央値 M_type が非 null
  *           ? typeBase × market.compAdr / M_type   (市場の日別の高低だけを反映し、自社の品質プレミアムは割高とみなさない)
@@ -196,8 +197,10 @@ export function simulateRevenue(
         : null;
     // 市場がこれから埋める量を、その日の競合の残り在庫で割る (埋まっている日ほど残りの部屋が予約されやすい)
     const remainingShare = 1 - (mOcc ?? fL);
-    const q = remainingShare > 0 ? clamp((curve.f0 - fL) / remainingShare, 0, P_MAX) : 0;
-    if (!(q > 0)) zeroPickupDays++;
+    const pickup = curve.f0 - fL;
+    // 競合が満室 (残り在庫 0) でも市場がまだ埋まる局面なら需要超過 = 上限の成約確率
+    const q = !(pickup > 0) ? 0 : remainingShare > 1e-9 ? clamp(pickup / remainingShare, 0, P_MAX) : P_MAX;
+    if (!(pickup > 0)) zeroPickupDays++;
     simDays.push({
       q: Number.isFinite(q) ? q : 0,
       ref,

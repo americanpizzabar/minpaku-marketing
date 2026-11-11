@@ -267,34 +267,61 @@ describe("computePricingDashboard (統合)", () => {
     const base = buildInputs();
     const d = computePricingDashboard({ ...base, own, lumina: { ...base.lumina, priceSource: "api" } }, NOW);
     assert.ok(
-      d.status.warnings.some((w) => /平日中央値 ¥55,000）が基準価格 ¥110,000 と50%低く/.test(w)),
+      d.status.warnings.some((w) => /平日中央値 ¥55,000）が基準価格 ¥110,000 より50%低く.*CompSet が入れ替わる/.test(w)),
       d.status.warnings.join("\n"),
     );
+    assert.equal(d.status.basePriceGapPct, -50);
     const near = own.map((o) => ({ ...o, apiPrice: 100000 }));
     const d2 = computePricingDashboard({ ...base, own: near, lumina: { ...base.lumina, priceSource: "api" } }, NOW);
     assert.ok(!d2.status.warnings.some((w) => w.includes("平日中央値")));
+    assert.equal(d2.status.basePriceGapPct, null);
   });
   it("CompSet が小さすぎるときは有料の取得ではなく条件の見直しを促す", () => {
     const candidates = [candidate(0), candidate(1)]; // 2件とも新鮮だが minUnitsForSignal 未満
     const d = computePricingDashboard(buildInputs({ candidates }), NOW);
     assert.equal(d.status.mode, "no_market_data");
     const w = d.status.warnings.join("\n");
-    assert.match(w, /CompSetが2件で、市場シグナルに必要な\d+件に足りない/);
+    assert.match(w, /CompSetで取得できる競合が2件で、市場シグナルに必要な\d+件に足りない/);
     assert.doesNotMatch(w, /競合連動にするには「競合カレンダーを取得」/);
   });
 
-  it("Pace 未算出の案内は自動取得のオン/オフで変える (オフなら2回目の取得が必要と伝える)", () => {
+  it("取得失敗の物件を除くと足りない場合も、有料の取得ではなく条件の見直しを促す", () => {
+    const candidates = Array.from({ length: 4 }, (_, i) =>
+      candidate(i, i < 2 ? {} : { ratesSyncedAt: addDaysStr(TODAY, -40), lastAttemptAt: addDaysStr(TODAY, -1) }),
+    );
+    const d = computePricingDashboard(buildInputs({ candidates }), NOW);
+    const failed = d.compset.members.filter((m) => m.calendarStatus === "failed").length;
+    assert.ok(failed > 0, JSON.stringify(d.compset.members.map((m) => m.calendarStatus)));
+    assert.equal(d.status.mode, "no_market_data");
+    assert.ok(d.compset.members.length - failed < DEFAULT_PRICING_CONFIG.minUnitsForSignal);
+    const w = d.status.warnings.join("\n");
+    assert.match(w, /CompSetで取得できる競合が\d+件（全\d+件中\d+件は取得失敗）/);
+    assert.doesNotMatch(w, /競合連動にするには「競合カレンダーを取得」/);
+  });
+
+  it("Pace 未算出の案内は自動取得のオン/オフで変える (オフなら手動取得では算出できないと伝える)", () => {
     const base = buildInputs();
     // 比較用の古いスナップショットを除く → Pace は算出できない
     const single = { ...base, snapshots: base.snapshots.filter((x) => x.snapshotDate === addDaysStr(TODAY, -1)) };
     const off = computePricingDashboard(single, NOW);
     assert.equal(off.status.paceAvailable, false);
     const wOff = off.status.warnings.join("\n");
-    assert.match(wOff, /2回目の取得が必要/);
+    assert.match(wOff, /競合の自動取得が必要です。現在オフのため算出されません（設定でオンにすると約\$[\d.]+\/月）/);
     assert.doesNotMatch(wOff, /追加の手動取得は不要/);
+    assert.doesNotMatch(wOff, /「競合カレンダーを取得」を実行してください/);
     const cfgOn = { ...DEFAULT_PRICING_CONFIG, compsetAutoRefresh: true };
     const on = computePricingDashboard({ ...single, config: cfgOn }, NOW);
     assert.match(on.status.warnings.join("\n"), /自動取得で算出されます（追加の手動取得は不要です）/);
+  });
+
+  it("平日の急増アラートの日は要注意日にも入れる (アラートと要注意日・⚡を一致させる)", () => {
+    const d = computePricingDashboard(buildInputs(), NOW);
+    const weekdaySpikes = d.alerts.filter((a) => a.kind === "weekday_spike").map((a) => a.date);
+    assert.ok(weekdaySpikes.length > 0, "前提: 平日の急増アラートがある");
+    for (const date of weekdaySpikes) {
+      assert.ok(d.kpis.spikeDates.includes(date), date);
+      assert.equal(d.days.find((x) => x.date === date)?.market.spike, true);
+    }
   });
 
   it("年末年始の夜は週末より大きいプレミアムに合わせた上限を使う", () => {

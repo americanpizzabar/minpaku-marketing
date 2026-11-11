@@ -49,14 +49,15 @@
  *           それ以外 → 取得済みカレンダーが対象期間をカバーしていない
  *       - 0 < freshCount < members: "{members − fresh}件のカレンダーが未取得/古い状態です"
  *       - failed の member があれば: "{k}件はカレンダーを取得できませんでした（掲載終了の可能性）"
- *       - !paceAvailable かつ paceAvailableFrom: 自動取得オン → "{M/D} 以降の自動取得で算出（追加の手動取得は不要）"、
- *           オフ → 2回目の取得が必要 ({M/D}以降に「競合カレンダーを取得」)。paceAvailableFrom が無く自動取得オフ → 急増は検知されない旨
+ *       - !paceAvailable: 自動取得オンかつ paceAvailableFrom → "{M/D} 以降の自動取得で算出（追加の手動取得は不要）"、
+ *           自動取得オフ (かつ新鮮な物件あり) → 自動取得が必要で現在は算出されない旨と月額目安
+ *           (手動取得は古い物件だけが対象なので、3〜7日間隔の2回目の取得は作れない)
  *       - paceAvailable かつ cfg.compsetRefreshDays > 1: "差分検知は前日比ではなく約{paceWindowDays}日間隔のスナップショット比較です（費用削減のため）"
  *       - ownStatusSource "none": "自社の予約状況が未連携です（iCal連携または手動入力で反映）"
  *       - icalConfigured かつ icalLastImport が (null か !ok か 2日以上前): "iCal取り込みが{at}以降失敗/停止しています（{error}）"
  *       - ownPriceSource "assumed": "自社の現在価格が未入力のため、乖離率は表示していません（設定で「Airbnbで設定中の価格」を入力すると比較できます）"
- *       - 現在価格が AirROI の実価格 (api) の日があり、平日 (ピーク除く) の実価格の中央値が基準価格から ±25% 超ずれる:
- *         "AirROI上の実際の販売価格（向こう{H}日の平日中央値 ¥{m}）が基準価格 ¥{base} と{x}%ずれています…"
+ *       - 現在価格が AirROI の実価格 (api) の日が5日以上あり、平日 (ピーク除く) の実価格の中央値が基準価格から ±25% 超ずれる:
+ *         "AirROI上の実際の販売価格（向こう{H}日の平日中央値 ¥{m}）が基準価格 ¥{base} より{x}%低く/高く…" (status.basePriceGapPct にも)
  *         (ルールのみの推奨は基準価格から算出されるため、基準価格の見直しを促す)
  *       - basePriceAboveAll: "自社基準価格は品質同等の周辺物件すべての参照ADRを上回ります（最高 ¥{max}）"
  *         それ以外で basePricePercentile >= 90: "自社基準価格は品質同等の周辺物件の上位{max(0.1, 100−pct)}%に位置します"
@@ -240,6 +241,20 @@ export function computePricingDashboard(inputs: PricingInputs, now?: string): Pr
     return { date, lead, night, market: m, own: { status, statusSource, currentPrice, currentPriceSource }, pricing };
   });
 
+  // 平日の急増 (仕様6章: 平日稼働率が跳ねた日) は要注意日の閾値より低い。アラートと要注意日・⚡表示を一致させる
+  for (const d of days) {
+    const m = d.market;
+    if (
+      d.night.type === "weekday" &&
+      m.dataQuality === "ok" &&
+      m.pace != null &&
+      m.pace >= cfg.alerts.weekdaySpikePt &&
+      (m.newBookings ?? 0) >= cfg.spike.minNewBookings
+    ) {
+      m.spike = true;
+    }
+  }
+
   // 10〜11. 直近実績とシミュレーション
   const past = computePastDays(today, members, inputs.calendar, inputs.snapshots, inputs.own, cfg);
   const simulation = simulateRevenue(days, curves, cfg);
@@ -326,12 +341,16 @@ export function computePricingDashboard(inputs: PricingInputs, now?: string): Pr
   if (compset.relaxations.length > 0) {
     warnings.push(`条件を緩和してCompSetを構成: ${compset.relaxations.join("、")}`);
   }
+  const failed = members.filter((m) => m.calendarStatus === "failed").length;
   if (mode === "no_market_data") {
     const min = cfg.minUnitsForSignal;
-    if (members.length < min) {
+    const reachable = members.length - failed;
+    if (reachable < min) {
       // カレンダーを取得しても解消しない (有料の取得を勧めない)
       warnings.push(
-        `CompSetが${members.length}件で、市場シグナルに必要な${min}件に足りないため、推奨価格は曜日・直前ルールのみで算出されています（設定でCompSetの条件を広げてください）`,
+        `CompSetで取得できる競合が${reachable}件` +
+          (failed > 0 ? `（全${members.length}件中${failed}件は取得失敗）` : "") +
+          `で、市場シグナルに必要な${min}件に足りないため、推奨価格は曜日・直前ルールのみで算出されています（設定でCompSetの条件を広げてください）`,
       );
     } else if (compset.freshCount < min) {
       warnings.push(
@@ -346,17 +365,14 @@ export function computePricingDashboard(inputs: PricingInputs, now?: string): Pr
   if (compset.freshCount > 0 && compset.freshCount < members.length) {
     warnings.push(`${members.length - compset.freshCount}件のカレンダーが未取得/古い状態です`);
   }
-  const failed = members.filter((m) => m.calendarStatus === "failed").length;
   if (failed > 0) warnings.push(`${failed}件はカレンダーを取得できませんでした（掲載終了の可能性）`);
-  if (!paceAvailable && pace.paceAvailableFrom) {
-    warnings.push(
-      cfg.compsetAutoRefresh
-        ? `Pace（消化ペース）は ${md(pace.paceAvailableFrom)} 以降の自動取得で算出されます（追加の手動取得は不要です）`
-        : `Pace（消化ペース）の算出には2回目の取得が必要です。競合の自動取得がオフのため、${md(pace.paceAvailableFrom)}以降（初回の取得から3〜7日後）に「競合カレンダーを取得」を実行してください`,
-    );
+  if (!paceAvailable && cfg.compsetAutoRefresh && pace.paceAvailableFrom) {
+    warnings.push(`Pace（消化ペース）は ${md(pace.paceAvailableFrom)} 以降の自動取得で算出されます（追加の手動取得は不要です）`);
   } else if (!paceAvailable && !isDemo && !cfg.compsetAutoRefresh && compset.freshCount > 0) {
+    // 手動の「競合カレンダーを取得」は古い (未取得) 物件しか対象にしないため、3〜7日間隔の2回目の取得は自動取得でしか作れない
     warnings.push(
-      "Pace（消化ペース）は3〜7日間隔の2回の取得から算出します。競合の自動取得がオフのため、予約の急増は検知されません",
+      "Pace（消化ペース・予約の急増検知）は3〜7日間隔の2回の取得から算出するため、競合の自動取得が必要です。" +
+        `現在オフのため算出されません（設定でオンにすると約$${autoRefreshMonthlyUsd.toFixed(2)}/月）`,
     );
   }
   if (paceAvailable && cfg.compsetRefreshDays > 1) {
@@ -379,6 +395,7 @@ export function computePricingDashboard(inputs: PricingInputs, now?: string): Pr
       "自社の現在価格が未入力のため、乖離率は表示していません（設定で「Airbnbで設定中の価格」を入力すると比較できます）",
     );
   }
+  let basePriceGapPct: number | null = null;
   if (basePrice > 0) {
     const apiWeekday = days
       .filter((x) => x.own.currentPriceSource === "api" && x.night.type === "weekday" && x.night.peakPeriod == null)
@@ -390,10 +407,12 @@ export function computePricingDashboard(inputs: PricingInputs, now?: string): Pr
       const med = apiWeekday.length % 2 ? apiWeekday[mid] : (apiWeekday[mid - 1] + apiWeekday[mid]) / 2;
       const gap = (med / basePrice - 1) * 100;
       if (Math.abs(gap) > 25) {
+        basePriceGapPct = Math.round(gap);
         warnings.push(
-          `AirROI上の実際の販売価格（向こう${H}日の平日中央値 ${formatYen(med)}）が基準価格 ${formatYen(basePrice)} と` +
+          `AirROI上の実際の販売価格（向こう${H}日の平日中央値 ${formatYen(med)}）が基準価格 ${formatYen(basePrice)} より` +
             `${Math.round(Math.abs(gap))}%${gap < 0 ? "低く" : "高く"}なっています。推奨価格は基準価格から算出されるため、` +
-            "設定の「基準価格 P_base (平日)」が実態に合っているか確認してください",
+            "設定の「基準価格 P_base (平日)」が実態に合っているか確認してください。基準価格は CompSet の価格帯" +
+            `（±${cfg.compset.adrBandPct}%）の基準でもあり、変えると CompSet が入れ替わるため、競合カレンダーの取得は基準価格を確定してから行ってください`,
         );
       }
     }
@@ -423,6 +442,7 @@ export function computePricingDashboard(inputs: PricingInputs, now?: string): Pr
     refreshPlan,
     compsetAutoRefresh: cfg.compsetAutoRefresh,
     autoRefreshMonthlyUsd,
+    basePriceGapPct,
     alertChannel: inputs.alertChannel,
     lastNotifiedAt: inputs.lastNotifiedAt,
     warnings,

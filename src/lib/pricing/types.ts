@@ -434,6 +434,8 @@ export interface PricingStatus {
   icalLastImport: IcalImportStatus | null;
   refreshPlan: { ids: string[]; count: number; costUsd: number }; // 「今すぐ取得」ボタンで実際に取得する対象と費用
   compsetAutoRefresh: boolean;
+  /** AirROI の実価格 (平日中央値) と基準価格の差 (%, 整数)。±25% 以内・算出不可なら null */
+  basePriceGapPct: number | null;
   autoRefreshMonthlyUsd: number; // 自動取得をオンにした場合の月額目安 = min(members, compsetRefreshMax) × 0.10 × 30 / compsetRefreshDays
   alertChannel: "webhook" | "none";
   lastNotifiedAt: string | null;

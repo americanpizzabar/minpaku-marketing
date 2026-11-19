@@ -172,6 +172,10 @@ export function generateDemoLuminaMetrics(): LuminaMetric[] {
       configuredPrice: price,
       isBooked,
       actualRevenue: isBooked && offset < 0 ? price : 0,
+      priceSource: "demo",
+      priceObservedAt: null,
+      statusSource: "demo",
+      fetchedAt: null,
     });
   }
   return rows;

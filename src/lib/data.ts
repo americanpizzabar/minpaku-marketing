@@ -5,16 +5,29 @@ import {
   generateDemoMetrics,
   generateDemoProperties,
 } from "./demo-data";
+import { getOwnCalendarState } from "./lumina-calendar";
+import {
+  LUMINA_FIELD_META_KEY,
+  defaultLuminaListingId,
+  parseLuminaFieldMeta,
+  type LuminaFieldMeta,
+} from "./sync-config";
 import type { DailyMetric, LuminaMetric, Property, PropertyType } from "./types";
 
 export interface LuminaProfile {
   maxGuests: number;
   bedrooms: number;
-  occupancyOverride: number | null; // %表記。API未収録時に設定画面の値を使用
-  source: "api" | "manual" | "demo"; // luminaメトリクスの出所
+  occupancyOverride: number | null; // %表記。設定画面の稼働率 (AirROI の予約カレンダーが無いときに使用)
+  source: "api" | "manual" | "demo"; // 直近の自物件カレンダー取得の結果 (api=成功 / manual=失敗) / demo
   listingId: string | null; // 自物件のAirbnbリスティングID (リンク表示用)
   lat: number | null; // 自物件の緯度 (設定画面で指定, 地図マーカー用)
   lng: number | null;
+  /** 自物件カレンダーを AirROI から最後に取得できた日時 (UTC 'YYYY-MM-DD HH:MM:SS')。未取得・デモなら null */
+  ratesFetchedAt: string | null;
+  /** 設定画面の基準価格 (円/泊)。未設定なら null */
+  basePrice: number | null;
+  /** 設定値の出所 (手入力 / AirROI) と日時 */
+  fieldMeta: LuminaFieldMeta;
 }
 
 export interface Dataset {
@@ -86,6 +99,9 @@ export async function loadDataset(
       listingId: null,
       lat: null,
       lng: null,
+      ratesFetchedAt: null,
+      basePrice: null,
+      fieldMeta: {},
     },
     visibleKpiCards: [],
     visibleTableColumns: [],
@@ -125,11 +141,11 @@ async function loadFromTurso(
       args: [start, end],
     }),
     db.execute({
-      sql: "SELECT target_date, configured_price, is_booked, actual_revenue FROM lumina_fuji_metrics WHERE target_date BETWEEN ? AND ?",
+      sql: `SELECT ${LUMINA_COLUMNS} FROM lumina_fuji_metrics WHERE target_date BETWEEN ? AND ?`,
       args: [start, end],
     }),
     db.execute({
-      sql: "SELECT target_date, configured_price, is_booked, actual_revenue FROM lumina_fuji_metrics WHERE target_date BETWEEN ? AND ?",
+      sql: `SELECT ${LUMINA_COLUMNS} FROM lumina_fuji_metrics WHERE target_date BETWEEN ? AND ?`,
       args: [pacingStart, pacingEnd],
     }),
     db.execute({
@@ -140,7 +156,7 @@ async function loadFromTurso(
       "SELECT created_at FROM sync_logs WHERE status = 'SUCCESS' ORDER BY created_at DESC LIMIT 1",
     ),
     db.execute(
-      "SELECT key, value FROM sync_state WHERE key LIKE 'config:lumina%' OR key = 'lumina_source' OR key = 'config:kpi_cards' OR key = 'config:table_columns' OR key = 'config:data_mode'",
+      "SELECT key, value FROM sync_state WHERE key LIKE 'config:lumina%' OR key IN ('lumina_source') OR key = 'config:kpi_cards' OR key = 'config:table_columns' OR key = 'config:data_mode'",
     ),
     db.execute(
       "SELECT COUNT(DISTINCT property_id) AS c FROM daily_metrics",
@@ -157,6 +173,16 @@ async function loadFromTurso(
     return Number.isFinite(n) ? n : null;
   };
   const luminaSource = luminaCfg.get("lumina_source");
+  // 自社カレンダーの AirROI 取得日時は、保存されている AirROI 由来の行から求める (取得失敗で日付が消えないように)。
+  // 別のリスティングで取得した行なら実データとして使わない
+  const ownCalendar = await getOwnCalendarState(
+    db,
+    luminaCfg.get("config:lumina_listing_id")?.trim() || defaultLuminaListingId(),
+  );
+  const toLumina = (r: Record<string, unknown>): LuminaMetric => {
+    const m = toLuminaMetric(r);
+    return ownCalendar.foreignListing ? withoutAirroiProvenance(m) : m;
+  };
 
   const toMetric = (r: Record<string, unknown>): DailyMetric => ({
     propertyId: String(r.property_id),
@@ -205,18 +231,8 @@ async function loadFromTurso(
       ttmAvgMinNights: r.ttm_avg_min_nights != null ? Number(r.ttm_avg_min_nights) : null,
     })),
     metrics: metricsRes.rows.map((r) => toMetric(r as Record<string, unknown>)),
-    lumina: luminaRes.rows.map((r) => ({
-      targetDate: String(r.target_date),
-      configuredPrice: Number(r.configured_price),
-      isBooked: Boolean(Number(r.is_booked)),
-      actualRevenue: Number(r.actual_revenue ?? 0),
-    })),
-    luminaPacing: luminaPacingRes.rows.map((r) => ({
-      targetDate: String(r.target_date),
-      configuredPrice: Number(r.configured_price),
-      isBooked: Boolean(Number(r.is_booked)),
-      actualRevenue: Number(r.actual_revenue ?? 0),
-    })),
+    lumina: luminaRes.rows.map((r) => toLumina(r as Record<string, unknown>)),
+    luminaPacing: luminaPacingRes.rows.map((r) => toLumina(r as Record<string, unknown>)),
     pacingMetrics: pacingRes.rows.map((r) => toMetric(r as Record<string, unknown>)),
     luminaProfile: {
       maxGuests: cfgNum("config:lumina_max_guests") ?? LUMINA_PROFILE.maxGuests,
@@ -226,6 +242,13 @@ async function loadFromTurso(
       listingId: luminaCfg.get("config:lumina_listing_id") || null,
       lat: cfgNum("config:lumina_lat"),
       lng: cfgNum("config:lumina_lng"),
+      // 表示に使う AirROI 由来の行の最新の取得日時 (無ければ最後に成功した取得)
+      ratesFetchedAt: ownCalendar.fetchedAt,
+      basePrice: (() => {
+        const n = cfgNum("config:lumina_base_price") ?? Number(process.env.LUMINA_BASE_PRICE ?? 0);
+        return Number.isFinite(n) && n > 0 ? n : null;
+      })(),
+      fieldMeta: parseLuminaFieldMeta(luminaCfg.get(LUMINA_FIELD_META_KEY)),
     },
     visibleKpiCards: (luminaCfg.get("config:kpi_cards") ?? "").split(",").filter(Boolean),
     visibleTableColumns: (luminaCfg.get("config:table_columns") ?? "").split(",").filter(Boolean),
@@ -233,5 +256,38 @@ async function loadFromTurso(
     calendarCount: Number(calCountRes.rows[0]?.c ?? 0),
     dataSource: "turso",
     lastSyncedAt: syncRes.rows[0] ? String(syncRes.rows[0].created_at) : null,
+  };
+}
+
+const LUMINA_COLUMNS =
+  "target_date, configured_price, is_booked, actual_revenue, price_source, price_observed_at, status_source, fetched_at";
+
+/** 別のリスティングで取得した行: AirROI の価格・予約状況を実データとして使わない (基準価格の行はそのまま) */
+export function withoutAirroiProvenance(m: LuminaMetric): LuminaMetric {
+  const realPrice = m.priceSource === "airroi";
+  return {
+    ...m,
+    configuredPrice: realPrice ? 0 : m.configuredPrice,
+    priceSource: realPrice ? null : m.priceSource,
+    priceObservedAt: null,
+    isBooked: m.statusSource === "airroi" ? false : m.isBooked,
+    statusSource: null,
+    fetchedAt: null,
+  };
+}
+
+/** lumina_fuji_metrics の行 → LuminaMetric (出所の列が想定外の値なら「不明」として扱う) */
+export function toLuminaMetric(r: Record<string, unknown>): LuminaMetric {
+  const str = (v: unknown): string | null => (v === null || v === undefined || v === "" ? null : String(v));
+  const priceSource = str(r.price_source);
+  return {
+    targetDate: String(r.target_date),
+    configuredPrice: Number(r.configured_price) || 0,
+    isBooked: Boolean(Number(r.is_booked)),
+    actualRevenue: Number(r.actual_revenue ?? 0),
+    priceSource: priceSource === "airroi" || priceSource === "base" ? priceSource : null,
+    priceObservedAt: str(r.price_observed_at),
+    statusSource: str(r.status_source) === "airroi" ? "airroi" : null,
+    fetchedAt: str(r.fetched_at),
   };
 }

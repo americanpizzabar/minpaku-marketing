@@ -2,7 +2,9 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { formatJstMonthDay } from "@/lib/format";
 import { KPI_CARD_DEFS, KPI_SEGMENTS } from "@/lib/kpi-cards";
+import type { LuminaFieldMeta, LuminaMetaField } from "@/lib/sync-config";
 
 interface SettingsState {
   autoSync: boolean;
@@ -56,6 +58,46 @@ function toFormState(config: Record<string, unknown>): SettingsState {
   };
 }
 
+/** 出所を表示する自物件の項目の「値があるか」(フォーム表現での判定) */
+function fieldHasValue(form: SettingsState, field: LuminaMetaField): boolean {
+  const v = form[field];
+  if (field === "luminaBasePrice") return Number(v) > 0;
+  return String(v ?? "").trim() !== "";
+}
+
+/**
+ * 自物件の項目の出所ラベル:「手入力 11/19」「AirROI 11/19取得」「手入力（日時不明）」。
+ * 値が空なら何も出さない。保存前に書き換えた項目は「未保存」と出す (保存済みの値の出所と取り違えないため)。
+ */
+function Provenance({
+  field,
+  form,
+  saved,
+  meta,
+}: {
+  field: LuminaMetaField;
+  form: SettingsState;
+  saved: SettingsState | null;
+  meta: LuminaFieldMeta;
+}) {
+  if (!fieldHasValue(form, field)) return null;
+  const cls = "mt-0.5 block text-[10px] leading-tight break-words";
+  if (saved && String(form[field] ?? "") !== String(saved[field] ?? "")) {
+    return <span className={`${cls} text-indigo-600`}>未保存の変更（保存すると手入力として記録）</span>;
+  }
+  const m = meta[field];
+  const date = m ? formatJstMonthDay(m.at) : null;
+  if (!m || !date) return <span className={`${cls} text-slate-400`}>手入力（日時不明）</span>;
+  if (m.source === "airroi") {
+    return (
+      <span className={`${cls} text-emerald-700`}>
+        AirROI {date}取得{m.dataDate ? `（データ時点 ${m.dataDate}）` : ""}
+      </span>
+    );
+  }
+  return <span className={`${cls} text-slate-500`}>手入力 {date}</span>;
+}
+
 const inputClass =
   "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:border-indigo-500 focus:outline-none";
 const labelClass = "mb-1 block text-xs font-semibold text-slate-500";
@@ -80,6 +122,15 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
     monthlyIfAutoUsd: number;
   } | null>(null);
   const [form, setForm] = useState<SettingsState | null>(null);
+  // 保存済みの値 (フォームとの差分 =「未保存」の判定用) と、自物件の各項目の出所 (手入力 / AirROI と日時)
+  const [saved, setSaved] = useState<SettingsState | null>(null);
+  const [fieldMeta, setFieldMeta] = useState<LuminaFieldMeta>({});
+  const applyConfig = (config: Record<string, unknown>, meta?: LuminaFieldMeta) => {
+    const next = toFormState(config);
+    setForm(next);
+    setSaved(next);
+    if (meta !== undefined) setFieldMeta(meta ?? {});
+  };
   // 自物件スペックの直近の自動取得結果 (AirROI が返した値。実際の Airbnb より古いことがある)
   const [specsLastFetch, setSpecsLastFetch] = useState<{
     at: string;
@@ -102,7 +153,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
           setConfigured(false);
           return;
         }
-        setForm(toFormState(json.config));
+        applyConfig(json.config, json.luminaFieldMeta ?? {});
         setSpecsLastFetch(json.luminaSpecsLastFetch ?? null);
         setTracked(json.trackedProperties);
         setMonthlyCost(json.estimatedMonthlyCostUsd);
@@ -155,7 +206,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
         body: JSON.stringify({ action: "fetchLuminaSpecs" }),
       });
       const json = await res.json();
-      if (json.config) setForm(toFormState(json.config));
+      if (json.config) applyConfig(json.config, json.luminaFieldMeta);
       if (json.luminaSpecsLastFetch !== undefined) setSpecsLastFetch(json.luminaSpecsLastFetch);
       const text: string = json.message ?? json.error ?? (json.saved ? "取得しました" : "取得に失敗しました");
       setMessageTone(json.saved ? "info" : "error");
@@ -195,7 +246,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
       });
       const json = await res.json();
       if (json.saved) {
-        setForm(toFormState(json.config));
+        applyConfig(json.config, json.luminaFieldMeta);
         if (json.luminaSpecsLastFetch !== undefined) setSpecsLastFetch(json.luminaSpecsLastFetch);
         setMonthlyCost(json.estimatedMonthlyCostUsd);
         setCostEstimate(json.costEstimate ?? null);
@@ -360,6 +411,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                       }
                       placeholder="例: 78000"
                     />
+                    <Provenance field="luminaBasePrice" form={form} saved={saved} meta={fieldMeta} />
                   </div>
                   <div className="flex gap-2">
                     <div className="flex-1">
@@ -374,6 +426,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                           setForm({ ...form, luminaBedrooms: Number(e.target.value) || 1 })
                         }
                       />
+                    <Provenance field="luminaBedrooms" form={form} saved={saved} meta={fieldMeta} />
                     </div>
                     <div className="flex-1">
                       <label className={labelClass}>定員 (人)</label>
@@ -387,6 +440,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                           setForm({ ...form, luminaMaxGuests: Number(e.target.value) || 1 })
                         }
                       />
+                    <Provenance field="luminaMaxGuests" form={form} saved={saved} meta={fieldMeta} />
                     </div>
                   </div>
                   <div className="flex gap-2">
@@ -400,6 +454,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                         onChange={(e) => setForm({ ...form, luminaLat: e.target.value })}
                         placeholder="例: 35.4130"
                       />
+                    <Provenance field="luminaLat" form={form} saved={saved} meta={fieldMeta} />
                     </div>
                     <div className="flex-1">
                       <label className={labelClass}>経度</label>
@@ -411,6 +466,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                         onChange={(e) => setForm({ ...form, luminaLng: e.target.value })}
                         placeholder="例: 138.8760"
                       />
+                    <Provenance field="luminaLng" form={form} saved={saved} meta={fieldMeta} />
                     </div>
                   </div>
                   <div>
@@ -429,6 +485,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                       }
                       placeholder="例: 65 (空欄=未設定)"
                     />
+                    <Provenance field="luminaOccupancy" form={form} saved={saved} meta={fieldMeta} />
                   </div>
                 </div>
               </div>
@@ -501,6 +558,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                         onChange={(e) => setForm({ ...form, luminaRating: e.target.value })}
                         placeholder="例: 4.85"
                       />
+                    <Provenance field="luminaRating" form={form} saved={saved} meta={fieldMeta} />
                     </div>
                     <div className="flex-1">
                       <label className={labelClass}>レビュー数</label>
@@ -512,6 +570,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                         onChange={(e) => setForm({ ...form, luminaReviews: e.target.value })}
                         placeholder="例: 42"
                       />
+                    <Provenance field="luminaReviews" form={form} saved={saved} meta={fieldMeta} />
                     </div>
                   </div>
                   <div className="flex gap-2">
@@ -525,6 +584,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                         onChange={(e) => setForm({ ...form, luminaPhotos: e.target.value })}
                         placeholder="例: 35"
                       />
+                    <Provenance field="luminaPhotos" form={form} saved={saved} meta={fieldMeta} />
                     </div>
                     <div className="flex-1">
                       <label className={labelClass}>スーパーホスト</label>
@@ -542,6 +602,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                         <option value="yes">はい</option>
                         <option value="no">いいえ</option>
                       </select>
+                    <Provenance field="luminaSuperhost" form={form} saved={saved} meta={fieldMeta} />
                     </div>
                   </div>
                   <div>
@@ -553,6 +614,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                       onChange={(e) => setForm({ ...form, luminaAmenities: e.target.value })}
                       placeholder="例: Hot tub, Sauna, BBQ grill, Wifi, Free parking"
                     />
+                    <Provenance field="luminaAmenities" form={form} saved={saved} meta={fieldMeta} />
                     <p className="mt-1 text-[11px] text-slate-400">
                       AirROIの設備名(英語)に合わせると勝ち組との保有比較が正確になります
                     </p>

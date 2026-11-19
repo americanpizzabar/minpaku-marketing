@@ -13,6 +13,8 @@ import {
 import { KPI_CARD_DEFS } from "@/lib/kpi-cards";
 import { TABLE_COLUMN_IDS } from "@/lib/table-columns";
 import { ensureSchema, getDb } from "@/lib/db";
+import { getLuminaFieldMeta, recordManualLuminaEdits } from "@/lib/sync-config";
+import { resetOwnCalendarProvenance } from "@/lib/lumina-calendar";
 
 export const dynamic = "force-dynamic";
 
@@ -44,6 +46,7 @@ export async function GET(request: NextRequest) {
       return Number.isFinite(n) && n >= min && n <= max ? n : undefined;
     };
     const autoSyncParam = params.get("autoSync");
+    const prevConfig = await getSyncConfig(db);
     await saveSyncConfig(db, {
       autoSync: autoSyncParam === null ? undefined : autoSyncParam !== "0",
       ratesRefreshDays: numParam("ratesRefreshDays", 1, 90),
@@ -71,9 +74,16 @@ export async function GET(request: NextRequest) {
         tableColumns: cols.split(",").map((s) => s.trim()).filter((id) => TABLE_COLUMN_IDS.includes(id)),
       });
     }
+    const savedConfig = await getSyncConfig(db);
+    if (savedConfig.luminaListingId !== prevConfig.luminaListingId) {
+      // 別のリスティングに変えたら、前のリスティングの AirROI の価格・予約状況を実データとして扱わない
+      await resetOwnCalendarProvenance(db);
+    }
     if (params.get("luminaListingId") !== null || params.get("luminaBasePrice") !== null) {
       await db.execute("DELETE FROM sync_state WHERE key = 'lumina_rates_at'");
     }
+    // 値が実際に変わった自物件の項目を「手入力・今」として記録する
+    await recordManualLuminaEdits(db, prevConfig, savedConfig);
   }
 
   const config = await getSyncConfig(db);
@@ -86,6 +96,7 @@ export async function GET(request: NextRequest) {
     configured: true,
     config,
     luminaSpecsLastFetch: await getLuminaSpecLastFetch(db, config.luminaListingId),
+    luminaFieldMeta: await getLuminaFieldMeta(db),
     trackedProperties,
     costEstimate,
     estimatedMonthlyCostUsd: costEstimate.autoSync ? costEstimate.monthlyIfAutoUsd : 0,
@@ -135,6 +146,7 @@ export async function POST(request: NextRequest) {
         fetched: result.fetched,
         config: newConfig,
         luminaSpecsLastFetch: await getLuminaSpecLastFetch(db, newConfig.luminaListingId),
+        luminaFieldMeta: await getLuminaFieldMeta(db),
         trackedProperties,
         costEstimate,
         estimatedMonthlyCostUsd: costEstimate.autoSync ? costEstimate.monthlyIfAutoUsd : 0,
@@ -228,6 +240,14 @@ export async function POST(request: NextRequest) {
   });
 
   let config = await getSyncConfig(db);
+  // 値が実際に変わった自物件の項目を「手入力・今」として記録する (この後の自動取得で更新された項目は AirROI に上書きされる)
+  await recordManualLuminaEdits(db, prevConfig, config);
+
+  // 別のリスティングに変えたら、前のリスティングの AirROI の価格・予約状況を実データとして扱わない
+  // (この後の取得が失敗しても、基準価格・手入力の稼働率に戻る)
+  if (config.luminaListingId !== prevConfig.luminaListingId) {
+    await resetOwnCalendarProvenance(db);
+  }
 
   // リスティングID・基準価格が変わった場合はその場でベンチマークを再生成し、
   // 保存直後のページ再読み込みでグラフに即時反映されるようにする
@@ -263,6 +283,7 @@ export async function POST(request: NextRequest) {
     saved: true,
     specsMessage,
     luminaSpecsLastFetch: await getLuminaSpecLastFetch(db, config.luminaListingId),
+    luminaFieldMeta: await getLuminaFieldMeta(db),
     config,
     trackedProperties,
     costEstimate,

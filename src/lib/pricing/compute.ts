@@ -445,6 +445,7 @@ export function computePricingDashboard(inputs: PricingInputs, now?: string): Pr
     basePriceGapPct,
     alertChannel: inputs.alertChannel,
     lastNotifiedAt: inputs.lastNotifiedAt,
+    ownCalendarFetchedAt: inputs.ownCalendarFetchedAt ?? null,
     warnings,
   };
 

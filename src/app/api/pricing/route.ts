@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { isAirRoiConfigured, refreshLuminaRates } from "@/lib/airroi";
 import { hasCronBearer } from "@/lib/cron-auth";
 import { publicErrorMessage } from "@/lib/errors";
 import { toDateStr, todayJst } from "@/lib/dates";
@@ -9,6 +10,7 @@ import { getPricingConfig, savePricingConfig } from "@/lib/pricing/config-store"
 import { addDaysStr } from "@/lib/pricing/holidays";
 import { importIcalToDb } from "@/lib/pricing/ical";
 import { refreshCompsetCalendars, runPricingPipeline } from "@/lib/pricing/pipeline";
+import { COST_PER_RATES_CALL, getSyncConfig } from "@/lib/sync-config";
 import type { OwnStatus, PricingApiResponse } from "@/lib/pricing/types";
 
 export const dynamic = "force-dynamic";
@@ -180,6 +182,54 @@ export async function POST(request: NextRequest) {
           saved: r.saved,
           alerts: r.alerts,
         });
+      }
+
+      case "refreshOwnCalendar": {
+        // 自社カレンダー (価格・予約状況) を AirROI から取得する ($0.10/回。404 等の失敗でも課金される)
+        const sync = await getSyncConfig(db);
+        if (!sync.luminaListingId) {
+          return reply({ ok: false, message: "自物件のAirbnbリスティングIDが未設定です（設定画面で入力してください）", costUsd: 0 }, 400);
+        }
+        if (!isAirRoiConfigured()) {
+          return reply({ ok: false, message: "AirROI の APIキーが未設定のため取得できません", costUsd: 0 }, 400);
+        }
+        const r = await refreshLuminaRates(db, sync);
+        const costUsd = r.usedApi ? COST_PER_RATES_CALL : 0;
+        if (r.ok) {
+          return reply({
+            ok: true,
+            message:
+              `自社カレンダーをAirROIから取得しました（${r.records}日分: 掲載価格あり${r.pricedDays}日・予約済/ブロック${r.bookedDays}日、` +
+              `約$${costUsd.toFixed(2)}）`,
+            refreshed: r.records,
+            costUsd,
+            ownCalendarFetchedAt: r.fetchedAt,
+          });
+        }
+        const keep = "これまでにAirROIで取得した実データはそのまま使います";
+        const code = r.httpStatus ?? Number(/AirROI API Error: (\d{3})/.exec(r.error ?? "")?.[1] ?? NaN);
+        let message: string;
+        if (r.failure === "network") {
+          // 応答を受け取れていない (DNS・TLS・切断等)。送信後に切断された場合だけ課金されうる
+          message =
+            "AirROIに接続できませんでした（通信エラー）。課金されていない可能性が高いですが、" +
+            `送信後に切断された場合は課金されることがあります。${keep}`;
+        } else if (r.failure === "empty") {
+          message = `AirROIが空のカレンダーを返しました。API呼び出し1回分（約$${costUsd.toFixed(2)}）は消費されます。${keep}`;
+        } else if (r.failure === "parse") {
+          message = `AirROIから応答はありましたが内容を読み取れませんでした。API呼び出し1回分（約$${costUsd.toFixed(2)}）は消費されます。${keep}`;
+        } else if (Number.isFinite(code)) {
+          const reason =
+            code === 404
+              ? "AirROIにこの物件のカレンダーが見つかりませんでした（404）"
+              : `AirROIがエラーを返しました（${code}）`;
+          message = `${reason}。API呼び出し1回分（約$${costUsd.toFixed(2)}）は消費されます。${keep}`;
+        } else {
+          message = r.usedApi
+            ? `AirROIからの取得に失敗しました。API呼び出し1回分（約$${costUsd.toFixed(2)}）は消費されます。${keep}`
+            : `AirROIからの取得に失敗しました（AirROIへの呼び出しは行っていません）。${keep}`;
+        }
+        return reply({ ok: false, message, refreshed: 0, costUsd }, 502);
       }
 
       default:

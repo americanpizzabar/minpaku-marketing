@@ -189,7 +189,7 @@ function ScatterTab({ data }: { data: ScatterPoint[] }) {
   );
 }
 
-function TrendTab({ data }: { data: TrendPoint[] }) {
+function TrendTab({ data, luminaNote }: { data: TrendPoint[]; luminaNote: string | null }) {
   return (
     <ResponsiveContainer width="100%" height={420}>
       <LineChart data={data} margin={{ top: 16, right: 24, bottom: 8, left: 8 }}>
@@ -229,7 +229,7 @@ function TrendTab({ data }: { data: TrendPoint[] }) {
           yAxisId="price"
           type="monotone"
           dataKey="luminaPrice"
-          name="Lumina Fuji 設定価格"
+          name={luminaNote ? `Lumina Fuji 価格（${luminaNote}）` : "Lumina Fuji 価格"}
           stroke="#f43f5e"
           strokeWidth={2}
           strokeDasharray="6 3"
@@ -250,7 +250,7 @@ function TrendTab({ data }: { data: TrendPoint[] }) {
   );
 }
 
-function BenchmarkTab({ data }: { data: BenchmarkPoint[] }) {
+function BenchmarkTab({ data, luminaNote }: { data: BenchmarkPoint[]; luminaNote: string | null }) {
   return (
     <ResponsiveContainer width="100%" height={420}>
       <LineChart data={data} margin={{ top: 16, right: 24, bottom: 8, left: 8 }}>
@@ -289,7 +289,7 @@ function BenchmarkTab({ data }: { data: BenchmarkPoint[] }) {
         <Line
           type="monotone"
           dataKey="lumina"
-          name="Lumina Fuji"
+          name={luminaNote ? `Lumina Fuji（${luminaNote}）` : "Lumina Fuji"}
           stroke="#f43f5e"
           strokeWidth={2.5}
           strokeDasharray="6 3"
@@ -328,11 +328,14 @@ export default function DashboardTabs({
   trend,
   benchmark,
   capacityBars,
+  luminaNote = null,
 }: {
   scatter: ScatterPoint[];
   trend: TrendPoint[];
   benchmark: BenchmarkPoint[];
   capacityBars: CapacityBar[];
+  /** 自物件の価格系列の出所 (例: "AirROI実データ・11/19取得" / "手入力の基準価格") */
+  luminaNote?: string | null;
 }) {
   const [active, setActive] = useState<(typeof TABS)[number]["id"]>("scatter");
 
@@ -354,8 +357,8 @@ export default function DashboardTabs({
         ))}
       </div>
       {active === "scatter" && <ScatterTab data={scatter} />}
-      {active === "trend" && <TrendTab data={trend} />}
-      {active === "benchmark" && <BenchmarkTab data={benchmark} />}
+      {active === "trend" && <TrendTab data={trend} luminaNote={luminaNote} />}
+      {active === "benchmark" && <BenchmarkTab data={benchmark} luminaNote={luminaNote} />}
       {active === "capacity" && <CapacityTab data={capacityBars} />}
     </div>
   );

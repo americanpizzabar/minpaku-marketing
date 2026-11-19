@@ -233,7 +233,8 @@ describe("ensureSchema: 新規 DB", () => {
     await ensureSchema(db);
     await ensureSchema(aliasClient(db));
     await ensureSchema(aliasClient(db));
-    assert.equal(await count(db, "SELECT COUNT(*) AS c FROM sync_state WHERE key LIKE 'migration:%'"), 2);
+    // stagger-rates / snapshot-backfill / lumina-provenance の3つ
+    assert.equal(await count(db, "SELECT COUNT(*) AS c FROM sync_state WHERE key LIKE 'migration:%'"), 3);
   });
 });
 

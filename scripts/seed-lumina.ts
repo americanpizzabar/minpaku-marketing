@@ -26,7 +26,9 @@ async function main() {
             ON CONFLICT(target_date) DO UPDATE SET
               configured_price=excluded.configured_price,
               is_booked=excluded.is_booked,
-              actual_revenue=excluded.actual_revenue`,
+              actual_revenue=excluded.actual_revenue,
+              -- デモ値を AirROI の実データと表示しないよう、出所の記録を消す (出所なし = 画面では使わない)
+              price_source=NULL, price_observed_at=NULL, status_source=NULL, fetched_at=NULL`,
       args: [r.targetDate, r.configuredPrice, r.isBooked ? 1 : 0, r.actualRevenue],
     });
   }

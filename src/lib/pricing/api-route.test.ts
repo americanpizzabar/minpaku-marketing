@@ -224,6 +224,126 @@ describe("POST /api/pricing: 操作", () => {
     const r = await call({ action: "importIcal" });
     assert.equal(r.status, 400);
   });
+
+  it("refreshOwnCalendar: 自社カレンダーを1回だけ取得し、費用と取得日時を返す (予約済みの日は前回の実価格を残す)", async () => {
+    const today = seed.today;
+    // seed: today+4 は AirROI の実価格 120004。モックでは today+1, +3, … が予約済み (価格なし)
+    const r = await call({ action: "refreshOwnCalendar" });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.ok, true);
+    assert.equal(r.json.costUsd, 0.1);
+    assert.equal(fetchUrls.length, 1, "AirROI は1回だけ");
+    assert.ok(fetchUrls[0].includes("/listings/future/rates") && fetchUrls[0].includes("id=999000"));
+    assert.match(String(r.json.message), /約\$0\.10/);
+    const fetchedAt = String(r.json.ownCalendarFetchedAt);
+    assert.match(fetchedAt, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+
+    const rows = await db.execute({
+      sql: `SELECT target_date, configured_price, is_booked, price_source, price_observed_at, status_source, fetched_at
+            FROM lumina_fuji_metrics WHERE target_date IN (?, ?, ?)`,
+      args: [addDaysStr(today, 2), addDaysStr(today, 3), addDaysStr(today, 59)],
+    });
+    const byDate = new Map(rows.rows.map((x) => [String(x.target_date), x]));
+    const avail = byDate.get(addDaysStr(today, 2))!;
+    assert.equal(Number(avail.configured_price), 100000);
+    assert.equal(avail.price_source, "airroi");
+    assert.equal(avail.price_observed_at, fetchedAt);
+    const booked = byDate.get(addDaysStr(today, 3))!;
+    assert.equal(Number(booked.is_booked), 1);
+    assert.equal(Number(booked.configured_price), 120003, "前回 AirROI で観測した価格を残す");
+    assert.equal(booked.price_observed_at, "2026-01-01 00:00:00");
+    assert.equal(booked.status_source, "airroi");
+    assert.equal(booked.fetched_at, fetchedAt);
+
+    const res = await route.GET();
+    const d = (await res.json()) as { status: { ownCalendarFetchedAt: string | null } };
+    assert.equal(d.status.ownCalendarFetchedAt, fetchedAt);
+  });
+
+  it("refreshOwnCalendar: AirROI が 404 なら 502 と消費した費用を返し、実データは残す", async () => {
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      fetchUrls.push(String(input));
+      return new Response("Listing has not been added to our system", { status: 404 });
+    }) as typeof fetch;
+    const before = await db.execute(
+      "SELECT COUNT(*) AS c FROM lumina_fuji_metrics WHERE price_source = 'airroi' AND configured_price > 0",
+    );
+    const okAt = await db.execute("SELECT value FROM sync_state WHERE key = 'lumina_rates_ok_at'");
+    const r = await call({ action: "refreshOwnCalendar" });
+    assert.equal(r.status, 502);
+    assert.equal(r.json.ok, false);
+    assert.equal(r.json.costUsd, 0.1);
+    assert.equal(fetchUrls.length, 1);
+    assert.match(String(r.json.message), /404/);
+    const after = await db.execute(
+      "SELECT COUNT(*) AS c FROM lumina_fuji_metrics WHERE price_source = 'airroi' AND configured_price > 0",
+    );
+    assert.equal(Number(after.rows[0].c), Number(before.rows[0].c), "AirROI の実価格は上書きしない");
+    const okAt2 = await db.execute("SELECT value FROM sync_state WHERE key = 'lumina_rates_ok_at'");
+    assert.equal(okAt2.rows[0].value, okAt.rows[0].value, "最終成功日時は進めない");
+  });
+
+  it("refreshOwnCalendar: 空のカレンダー (200・料金なし) は失敗として返し、費用は消費・取得日時は進めない", async () => {
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      fetchUrls.push(String(input));
+      return new Response(JSON.stringify({ rates: [] }), { status: 200 });
+    }) as typeof fetch;
+    const before = (await ((await route.GET()).json()) as { status: { ownCalendarFetchedAt: string | null } }).status
+      .ownCalendarFetchedAt;
+    const okAt = await db.execute("SELECT value FROM sync_state WHERE key = 'lumina_rates_ok_at'");
+    const r = await call({ action: "refreshOwnCalendar" });
+    assert.equal(r.status, 502);
+    assert.equal(r.json.ok, false);
+    assert.equal(r.json.costUsd, 0.1);
+    assert.equal(fetchUrls.length, 1);
+    assert.match(String(r.json.message), /空のカレンダー/);
+    assert.match(String(r.json.message), /約\$0\.10）は消費されます/);
+    const okAt2 = await db.execute("SELECT value FROM sync_state WHERE key = 'lumina_rates_ok_at'");
+    assert.equal(okAt2.rows[0].value, okAt.rows[0].value, "最終成功日時は進めない");
+    const after = (await ((await route.GET()).json()) as { status: { ownCalendarFetchedAt: string | null } }).status
+      .ownCalendarFetchedAt;
+    assert.equal(after, before, "自社カレンダーの取得日時は実データの日付のまま");
+  });
+
+  it("refreshOwnCalendar: 通信エラー (応答なし) は「接続できませんでした」・費用 0 (課金されない可能性が高い)", async () => {
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      fetchUrls.push(String(input));
+      throw new TypeError("fetch failed");
+    }) as typeof fetch;
+    const r = await call({ action: "refreshOwnCalendar" });
+    assert.equal(r.status, 502);
+    assert.equal(r.json.ok, false);
+    assert.equal(r.json.costUsd, 0);
+    assert.match(String(r.json.message), /接続できませんでした（通信エラー）/);
+    assert.match(String(r.json.message), /課金されていない可能性が高い/);
+    assert.doesNotMatch(String(r.json.message), /消費されます/);
+  });
+
+  it("refreshOwnCalendar: 応答はあるが読めない (不正な JSON) は「読み取れませんでした」・費用は消費", async () => {
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      fetchUrls.push(String(input));
+      return new Response("<html>maintenance</html>", { status: 200 });
+    }) as typeof fetch;
+    const r = await call({ action: "refreshOwnCalendar" });
+    assert.equal(r.status, 502);
+    assert.equal(r.json.ok, false);
+    assert.equal(r.json.costUsd, 0.1);
+    assert.match(String(r.json.message), /応答はありましたが内容を読み取れませんでした/);
+    assert.doesNotMatch(String(r.json.message), /接続できませんでした/);
+  });
+
+  it("refreshOwnCalendar: APIキー未設定なら AirROI を呼ばずに 400", async () => {
+    const key = process.env.AIRROI_API_KEY;
+    delete process.env.AIRROI_API_KEY;
+    try {
+      const r = await call({ action: "refreshOwnCalendar" });
+      assert.equal(r.status, 400);
+      assert.equal(r.json.costUsd, 0);
+      assert.equal(fetchUrls.length, 0);
+    } finally {
+      process.env.AIRROI_API_KEY = key;
+    }
+  });
 });
 
 describe("GET /api/pricing", () => {

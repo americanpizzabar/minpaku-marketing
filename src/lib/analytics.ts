@@ -1,4 +1,6 @@
-import { loadDataset } from "./data";
+import { loadDataset, type LuminaProfile } from "./data";
+import { newerTimestamp } from "./format";
+import type { LuminaMetaField } from "./sync-config";
 import { matchesDayType, rangeForTimeRange, todayJst, toDateStr, addDays } from "./dates";
 import { LUMINA_PROFILE } from "./demo-data";
 import {
@@ -12,6 +14,9 @@ import {
   type DashboardData,
   type Filters,
   type Kpis,
+  type LuminaMetric,
+  type LuminaSources,
+  type LuminaValueSource,
   type MapPoint,
   type Property,
   type PropertyRow,
@@ -70,6 +75,104 @@ function modeOf(counts: Map<number, number>): number {
     }
   }
   return best;
+}
+
+/** AirROI で観測した (またはデモの) 価格か。基準価格の代替値・価格なしの日は含まない */
+export function isRealLuminaPrice(m: LuminaMetric): boolean {
+  return (
+    (m.priceSource === "airroi" || m.priceSource === "demo") &&
+    m.configuredPrice > 0 &&
+    m.configuredPrice <= MAX_SANE_NIGHTLY
+  );
+}
+
+/** 予約状況が AirROI の (またはデモの) カレンダー由来か */
+export function isRealLuminaStatus(m: LuminaMetric): boolean {
+  return m.statusSource === "airroi" || m.statusSource === "demo";
+}
+
+/**
+ * 日別カレンダーから算出した値の出所。asOf = 使った行の最も新しい日時
+ * (価格は観測日時 price_observed_at、予約状況は取得日時 fetched_at)。どの行にも記録が無ければ null (取得日不明)。
+ * 価格に予約状況の取得日時を使わない (予約済みの日に残した古い実価格が、新しい取得の日付に見えないように)。
+ * 最終取得日時でも代用しない (その取得が返していない過去の日の値が、新しく見えないように)。
+ */
+function calendarSource(
+  lp: LuminaProfile,
+  rows: LuminaMetric[],
+  kind: "price" | "status",
+): LuminaValueSource {
+  if (lp.source === "demo") return { source: "demo", basis: "calendar", asOf: null, days: rows.length };
+  let asOf: string | null = null;
+  for (const m of rows) {
+    asOf = newerTimestamp(asOf, kind === "price" ? m.priceObservedAt : m.fetchedAt);
+  }
+  return { source: "airroi", basis: "calendar", asOf, days: rows.length };
+}
+
+/** 設定画面の値の出所 (記録が無ければ手入力・日時不明) */
+function settingSource(lp: LuminaProfile, field: LuminaMetaField): LuminaValueSource {
+  if (lp.source === "demo") return { source: "demo", basis: "setting", asOf: null, days: 0 };
+  const meta = lp.fieldMeta[field];
+  return {
+    source: meta?.source === "airroi" ? "airroi" : "manual",
+    basis: "setting",
+    asOf: meta?.at ?? null,
+    days: 0,
+  };
+}
+
+const NO_SOURCE: LuminaValueSource = { source: "none", basis: null, asOf: null, days: 0 };
+
+/**
+ * 自物件の ADR・稼働率を実データ優先で求める。
+ * ADR: AirROI で観測した価格 (>0) の平均 → 無ければ手入力の基準価格 → 無ければ null。
+ * 稼働率: AirROI の予約カレンダー (status_source='airroi') の予約済み割合 → 無ければ設定の稼働率 → 無ければ null。
+ */
+export function luminaAdrAndOcc(
+  lp: LuminaProfile,
+  rows: LuminaMetric[],
+): { adr: number | null; occ: number | null; adrSource: LuminaValueSource; occSource: LuminaValueSource } {
+  const priced = rows.filter(isRealLuminaPrice);
+  let adr: number | null = null;
+  let adrSource = NO_SOURCE;
+  if (priced.length > 0) {
+    adr = avg(priced.map((m) => m.configuredPrice));
+    adrSource = calendarSource(lp, priced, "price");
+  } else if (lp.basePrice !== null && lp.basePrice > 0) {
+    adr = lp.basePrice;
+    adrSource = settingSource(lp, "luminaBasePrice");
+  }
+  const statusRows = rows.filter(isRealLuminaStatus);
+  let occ: number | null = null;
+  let occSource = NO_SOURCE;
+  if (statusRows.length > 0) {
+    occ = statusRows.filter((m) => m.isBooked).length / statusRows.length;
+    occSource = calendarSource(lp, statusRows, "status");
+  } else if (lp.occupancyOverride !== null) {
+    occ = lp.occupancyOverride / 100;
+    occSource = settingSource(lp, "luminaOccupancy");
+  }
+  return { adr, occ, adrSource, occSource };
+}
+
+/** 今後 endDate までの自物件 Pacing (AirROI の予約カレンダー優先 → 設定の稼働率 → データなし) */
+export function luminaPacing(
+  lp: LuminaProfile,
+  pacingRows: LuminaMetric[],
+  endDate: string,
+): { value: number | null; source: LuminaValueSource } {
+  const rows = pacingRows.filter((m) => m.targetDate <= endDate && isRealLuminaStatus(m));
+  if (rows.length > 0) {
+    return {
+      value: rows.filter((m) => m.isBooked).length / rows.length,
+      source: calendarSource(lp, rows, "status"),
+    };
+  }
+  if (lp.occupancyOverride !== null) {
+    return { value: lp.occupancyOverride / 100, source: settingSource(lp, "luminaOccupancy") };
+  }
+  return { value: null, source: NO_SOURCE };
 }
 
 export async function getDashboardData(filters: Filters): Promise<DashboardData> {
@@ -230,21 +333,26 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
   }
   rows.sort((a, b) => b.adr - a.adr);
 
-  // Lumina Fuji の散布図ポイント
+  // Lumina Fuji の散布図ポイント (実データ優先。手入力の値を使った場合は名前に明記する)
   const lp = ds.luminaProfile;
-  const luminaPrices = luminaFiltered.map((m) => m.configuredPrice).filter((p) => p > 0);
-  const luminaAdr = luminaPrices.length > 0 ? avg(luminaPrices) : null;
-  // API実データがある場合は予約状況から算出、未収録時は設定画面で入力された稼働率を使う
-  const luminaOcc =
-    lp.source !== "api" && lp.occupancyOverride !== null
-      ? lp.occupancyOverride / 100
-      : luminaFiltered.length > 0
-        ? luminaFiltered.filter((m) => m.isBooked).length / luminaFiltered.length
-        : null;
+  const {
+    adr: luminaAdr,
+    occ: luminaOcc,
+    adrSource: luminaAdrSource,
+    occSource: luminaOccSource,
+  } = luminaAdrAndOcc(lp, luminaFiltered);
+  const luminaManualNotes = [
+    luminaAdrSource.source === "manual" ? "価格は手入力の基準価格" : null,
+    luminaOccSource.source === "manual" ? "稼働率は手入力" : null,
+  ].filter((v): v is string => v !== null);
+  const luminaTitle =
+    luminaManualNotes.length > 0
+      ? `${LUMINA_PROFILE.title} (${luminaManualNotes.join("・")})`
+      : LUMINA_PROFILE.title;
   if (luminaAdr !== null && luminaOcc !== null) {
     scatter.push({
       propertyId: "lumina",
-      title: LUMINA_PROFILE.title,
+      title: luminaTitle,
       area: LUMINA_PROFILE.area,
       adr: Math.round(luminaAdr),
       occupancyRate: Math.round(luminaOcc * 1000) / 10,
@@ -258,7 +366,7 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
     const hasExactLocation = lp.lat !== null && lp.lng !== null;
     mapPoints.push({
       id: "lumina",
-      title: hasExactLocation ? LUMINA_PROFILE.title : `${LUMINA_PROFILE.title} (位置は目安)`,
+      title: hasExactLocation ? luminaTitle : `${luminaTitle} (位置は目安)`,
       area: LUMINA_PROFILE.area,
       lat: lp.lat ?? 35.4167,
       lng: lp.lng ?? 138.8667,
@@ -357,14 +465,16 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
   );
 
   // ---- Lumina Fuji 単体のKPI (lumina_fuji_metrics + 設定値から算出) ----
+  const pacingLumina30 = luminaPacing(lp, ds.luminaPacing, pacing30End);
+  const pacingLumina60 = luminaPacing(lp, ds.luminaPacing, pacingEnd);
   const kpisLumina: Kpis = (() => {
     const adr = luminaAdr ?? 0;
     const occ = luminaOcc ?? 0;
-    // 自物件の週末プレミアム (期間内の設定価格ベース)
+    // 自物件の週末プレミアム (期間内の AirROI 実価格のみ。基準価格の代替値は一律のため使わない)
     const wk: number[] = [];
     const ph: number[] = [];
     for (const m of ds.lumina) {
-      if (m.configuredPrice <= 0) continue;
+      if (!isRealLuminaPrice(m)) continue;
       if (matchesDayType(m.targetDate, "weekday")) wk.push(m.configuredPrice);
       else if (matchesDayType(m.targetDate, "preholiday")) ph.push(m.configuredPrice);
     }
@@ -374,22 +484,12 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
       wk.length > 0 && ph.length > 0 && wkAdr > 0
         ? Math.round((phAdr / wkAdr - 1) * 1000) / 10
         : null;
-    // Pacing: API実データがあれば予約状況から、未収録時は設定画面の稼働率を使用
-    const pacingLumina = (endDate: string): number => {
-      if (lp.source === "api") {
-        const target = ds.luminaPacing.filter((m) => m.targetDate <= endDate);
-        return target.length > 0
-          ? target.filter((m) => m.isBooked).length / target.length
-          : 0;
-      }
-      return lp.occupancyOverride !== null ? lp.occupancyOverride / 100 : 0;
-    };
     return {
       adr: Math.round(adr),
       occupancyRate: occ,
       revpar: Math.round(adr * occ),
-      pacingOccupancy30: pacingLumina(pacing30End),
-      pacingOccupancy60: pacingLumina(pacingEnd),
+      pacingOccupancy30: pacingLumina30.value ?? 0,
+      pacingOccupancy60: pacingLumina60.value ?? 0,
       pricePerGuest: Math.round(adr / Math.max(lp.maxGuests, 1)),
       propertiesCount: 1,
       luminaAdr: luminaAdr !== null ? Math.round(luminaAdr) : null,
@@ -419,7 +519,15 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
     d.total += 1;
     if (!m.isAvailable) d.booked += 1;
   }
-  const luminaByDate = new Map(luminaFiltered.map((m) => [m.targetDate, m.configuredPrice]));
+  // 自物件の日別価格: AirROI の実価格のみ。期間内に実価格が1日も無い場合だけ手入力の基準価格の水平線
+  // (系列名で「手入力の基準価格」と明記する。DashboardTabs の luminaNote)
+  const luminaByDate = new Map<string, number>();
+  const luminaRealPriced = luminaFiltered.filter(isRealLuminaPrice);
+  if (luminaRealPriced.length > 0) {
+    for (const m of luminaRealPriced) luminaByDate.set(m.targetDate, m.configuredPrice);
+  } else if (lp.basePrice !== null && lp.basePrice > 0) {
+    for (const date of byDate.keys()) luminaByDate.set(date, lp.basePrice);
+  }
   const trend: TrendPoint[] = [...byDate.entries()]
     .filter(([, d]) => d.prices.length > 0)
     .sort(([a], [b]) => a.localeCompare(b))
@@ -480,6 +588,12 @@ export async function getDashboardData(filters: Filters): Promise<DashboardData>
     kpis,
     kpisTop20,
     kpisLumina,
+    luminaSources: {
+      adr: luminaAdrSource,
+      occupancy: luminaOccSource,
+      pacing: pacingLumina30.source,
+      maxGuests: settingSource(lp, "luminaMaxGuests"),
+    } satisfies LuminaSources,
     visibleKpiCards: ds.visibleKpiCards,
     visibleTableColumns: ds.visibleTableColumns,
     dataMode: ds.dataMode,

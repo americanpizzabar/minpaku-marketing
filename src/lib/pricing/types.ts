@@ -180,7 +180,8 @@ export type OwnPriceSource = "api" | "manual" | "assumed";
 
 export interface OwnDay {
   date: string;
-  /** AirROI の実カレンダー価格 (priceSource "api" で configured_price > 0 の日のみ)。それ以外は null */
+  /** AirROI の実カレンダー価格 (lumina_fuji_metrics.price_source = 'airroi' で configured_price > 0 の日のみ)。
+   *  基準価格の代替値 (price_source 'base') や価格なしの日は null */
   apiPrice: number | null;
   status: OwnStatus;
   statusSource: OwnStatusSource;
@@ -213,6 +214,9 @@ export interface PricingInputs {
   icalLastImport: IcalImportStatus | null;
   alertChannel: "webhook" | "none"; // 環境変数 ALERT_WEBHOOK_URL の有無 (URL 自体は渡さない)
   lastNotifiedAt: string | null; // pricing_alerts.notified_at の最大 (実送信のみ)
+  /** 自社カレンダー (lumina_fuji_metrics) を AirROI から最後に取得できた日時 (UTC 'YYYY-MM-DD HH:MM:SS')。
+   *  未取得・デモなら null (省略時も null 扱い) */
+  ownCalendarFetchedAt?: string | null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -439,6 +443,8 @@ export interface PricingStatus {
   autoRefreshMonthlyUsd: number; // 自動取得をオンにした場合の月額目安 = min(members, compsetRefreshMax) × 0.10 × 30 / compsetRefreshDays
   alertChannel: "webhook" | "none";
   lastNotifiedAt: string | null;
+  /** 自社カレンダーを AirROI から最後に取得できた日時 (UTC 'YYYY-MM-DD HH:MM:SS')。未取得・デモなら null */
+  ownCalendarFetchedAt: string | null;
   warnings: string[]; // 日本語の注意事項
 }
 
@@ -485,7 +491,9 @@ export type PricingApiRequest =
   /** 設定済み iCal URL から自社の予約・ブロックを取り込む */
   | { action: "importIcal" }
   /** 今日の推奨価格とアラートを保存 (通知はしない。定期実行でも毎日行われる) */
-  | { action: "persist" };
+  | { action: "persist" }
+  /** 自社カレンダー (価格・予約状況) を AirROI から今すぐ取得する (有料: $0.10/回。取得失敗でも課金される) */
+  | { action: "refreshOwnCalendar" };
 
 export interface PricingApiResponse {
   ok: boolean;
@@ -496,4 +504,5 @@ export interface PricingApiResponse {
   saved?: number; // persist 時の保存行数
   alerts?: number; // persist 時のアラート件数
   imported?: number; // importIcal 時の取り込み日数
+  ownCalendarFetchedAt?: string | null; // refreshOwnCalendar 成功時の取得日時 (UTC)
 }

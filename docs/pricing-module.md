@@ -114,6 +114,52 @@ WHERE date(fetched_at,'+9 hours') >= date('now','+9 hours','-120 days')
   上書き前の旧状態の退避はしない (バックフィルと毎回の保存で足りる)。
 - `syncStep` には CompSet 取得を **追加しない** (費用の経路を増やさない。CompSet は下記の定期実行と専用ボタンのみ)。
 
+## 自社の値の出所 (実データ優先・いつの実データか手入力か)
+
+AirROI の自社カレンダー (`GET /listings/future/rates`) は予約済みの日の料金を返さない。旧実装はその日に過去の取得失敗時の
+基準価格 ¥110,000 を残し、実価格と混ぜて ADR を出していた (本番: 実価格16日 平均¥77,442 + 代替値14日 → ¥92,636)。
+そこで `lumina_fuji_metrics` の各行に出所を持たせ、実データ (AirROI) を優先し、手入力の値はそう明記する。
+
+| 列 | 意味 |
+|---|---|
+| `price_source` | `'airroi'` = AirROI のカレンダーで観測した掲載価格 / `'base'` = 手入力の基準価格の代替値 / NULL = 価格なし |
+| `price_observed_at` | 価格を観測した日時 (UTC `YYYY-MM-DD HH:MM:SS`)。不明・基準価格なら NULL |
+| `status_source` | `'airroi'` = `is_booked` が AirROI 由来 / NULL = 不明 (使わない) |
+| `fetched_at` | その行の予約状況を AirROI から最後に取得した日時 (UTC) |
+
+- `refreshLuminaRates` (成功): 料金のある日 → `airroi`・観測日時=今。予約済み・料金なしの日は、既存が `airroi` ならその価格と観測日時を
+  残し (最後に掲載されていた実価格)、それ以外は価格 0・出所 NULL。予約状況は常に AirROI で更新。`sync_state` の
+  `lumina_rates_ok_at` (最後に成功した取得) / `lumina_rates_listing_id` (取得したリスティングID) / `lumina_rates_at` (最後の試行) /
+  `lumina_source` を記録。失敗時は `airroi` の行を上書きせず、他の行だけ基準価格 (`base`) で埋める (予約状況には触れない)。
+  200 でも日別の料金が1日も無い「空のカレンダー」は失敗扱い (`lumina_rates_ok_at` は進めない。試行日時は進めて同じ周期に再課金しない)。
+  `usedApi` (費用) は応答を受け取ったときだけ true: 通信エラー (応答なし) は課金されていない可能性が高いとして $0 と表示し、
+  読めない応答・404・空のカレンダーは1回分消費と表示する。
+- リスティングIDを変えたら (設定画面の保存・CRON キー付き GET、または `lumina_rates_listing_id` と設定のIDの不一致)、前の物件の
+  `airroi` の価格・予約状況と `lumina_rates_ok_at` を実データから外す (`src/lib/lumina-calendar.ts`)。新しい物件の取得が失敗しても
+  前の物件の値が「AirROI実データ」と表示されず、基準価格・手入力の稼働率に戻る。
+- 自社カレンダーの取得日時 (ダッシュボードの `ratesFetchedAt`・プライシングの `ownCalendarFetchedAt`) は、保存されている
+  `status_source='airroi'` の行の `MAX(fetched_at)` → 無ければ `lumina_rates_ok_at`。取得失敗や `lumina_rates_at` の削除で、
+  表示中の実データの日付が「未取得」にならない。KPI の日付は使った行の日時 (価格は `price_observed_at`、予約状況は `fetched_at`)
+  で、記録が無ければ「取得日不明」(最終取得日時では代用しない)。
+- 既存行は `ensureSchema` で一度だけバックフィル (`migration:lumina-provenance`)。直近の取得が成功なら基準価格と異なる価格を
+  `airroi` (観測日時 = `lumina_rates_at`)、それ以外の価格を `base`。予約状況は `lumina_rates_at` の UTC 日付以降の行 (その取得が
+  返し得た日) だけ AirROI 由来・取得日時 = `lumina_rates_at`。それより前の日は予約済みか実価格のある行だけ AirROI 由来 (取得日時不明) とし、
+  過去の取得失敗で書かれた基準価格の代替行 (予約なし) は出所不明のまま (稼働率は手入力の設定値に戻る)。`lumina_rates_ok_at`・
+  `lumina_rates_listing_id` が無ければ補う。失敗しても例外は投げず次回再試行。
+- マーケット概況 (`analytics.ts`): 自物件 ADR = 期間内の `airroi` 価格の平均 → 無ければ基準価格 (手入力) → 無ければ「—」。
+  稼働率・Pacing = `status_source='airroi'` の日の予約済み割合 → 無ければ設定の稼働率 → 無ければ「—」。
+  週末プレミアム・日別トレンド・ベンチマークの自物件系列も実価格のみ (トレンド/ベンチマークは実価格が1日も無い期間だけ基準価格を
+  「手入力の基準価格」と明記して表示)。出所は `DashboardData.luminaSources` で返し、KPI カードに「AirROI実データ（11/19取得）」
+  「手入力の設定値（11/2保存）」のように表示する (`src/lib/lumina-sources.ts`)。
+- 設定画面の自物件の各項目は `sync_state` の `config:lumina_field_meta` (JSON) に出所を記録する: 保存で値が変わった項目は
+  手入力・保存日時、自物件スペックの自動取得で更新した項目は AirROI・取得日時 (データ時点)。各欄の下に「手入力 11/19」
+  「AirROI 11/19取得」「手入力（日時不明）」を表示。
+- プライシング (`load.ts`): `apiPrice` は `price_source='airroi'` かつ価格 > 0 の日だけ。AirROI の予約状況は `status_source='airroi'`
+  の日だけ。直近の取得が失敗していても、過去に AirROI で取得した行は実データとして使う。データ状況バーに
+  「自社カレンダー: AirROI 11/3取得」(3日より古ければ強調) と「自社カレンダーを今すぐ取得（約$0.10）」ボタン
+  (`POST /api/pricing {action: "refreshOwnCalendar"}`。確認ダイアログあり。404・空のカレンダー・読めない応答は1回分課金、
+  通信エラーは課金されていない可能性が高い旨を表示) を出す。
+
 ## パイプラインと定期実行 (仕様6章)
 
 - `vercel.json`: 日次同期を `0 17 * * *` (JST 02:00) に変更。アラート用に `/api/cron/pricing-alerts` を `0 22 * * *` (JST 07:00) で追加

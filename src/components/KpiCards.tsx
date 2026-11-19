@@ -24,7 +24,13 @@ import {
   type KpiMetricId,
   type KpiSegmentId,
 } from "@/lib/kpi-cards";
-import type { Kpis } from "@/lib/types";
+import {
+  adrSourceText,
+  occupancySourceText,
+  perGuestSourceText,
+  revparSourceText,
+} from "@/lib/lumina-sources";
+import type { Kpis, LuminaSources } from "@/lib/types";
 
 // v4: 3列構成への変更に伴い既定順をリセット (旧配置の保存は引き継がない)
 const ORDER_KEY = "kpi-card-order-v4";
@@ -77,7 +83,7 @@ function Card({ def }: { def: CardDef }) {
       </p>
       {def.sub && (
         <p
-          className={`mt-0.5 text-[10px] leading-tight ${
+          className={`mt-0.5 text-[10px] leading-tight break-words ${
             def.accent === "up"
               ? "text-emerald-600"
               : def.accent === "down"
@@ -122,7 +128,7 @@ function SortableCard({ id, children }: { id: string; children: React.ReactNode 
 }
 
 /** 指定セグメントのKPIセットからカード定義を組み立てる */
-function buildSegmentCards(kpis: Kpis, segment: KpiSegmentId): CardDef[] {
+function buildSegmentCards(kpis: Kpis, segment: KpiSegmentId, sources?: LuminaSources): CardDef[] {
   const dist = kpis.minStayDist;
   const distTotal = dist.n1 + dist.n2 + dist.n3plus;
   const pct = (n: number) => (distTotal > 0 ? Math.round((n / distTotal) * 100) : 0);
@@ -182,6 +188,43 @@ function buildSegmentCards(kpis: Kpis, segment: KpiSegmentId): CardDef[] {
         },
   };
 
+  // 自物件: 各値が AirROI の実データか手入力か、いつの値かを補足に明記する
+  if (isOwn && sources) {
+    const none = (src: { source: string }) => src.source === "none";
+    byMetric.adr = {
+      ...byMetric.adr,
+      value: none(sources.adr) ? "—" : byMetric.adr.value,
+      sub: adrSourceText(sources.adr),
+    };
+    byMetric.occupancy = {
+      ...byMetric.occupancy,
+      value: none(sources.occupancy) ? "—" : byMetric.occupancy.value,
+      sub: occupancySourceText(sources.occupancy),
+    };
+    byMetric.revpar = {
+      ...byMetric.revpar,
+      value: none(sources.adr) || none(sources.occupancy) ? "—" : byMetric.revpar.value,
+      sub: revparSourceText(sources),
+    };
+    byMetric.pacing = {
+      ...byMetric.pacing,
+      value: none(sources.pacing) ? "—" : byMetric.pacing.value,
+      sub: none(sources.pacing)
+        ? occupancySourceText(sources.pacing)
+        : `今後30日 / 60日: ${formatPercent(kpis.pacingOccupancy60)}｜${occupancySourceText(sources.pacing)}`,
+    };
+    byMetric.ppg = {
+      ...byMetric.ppg,
+      value: none(sources.adr) ? "—" : byMetric.ppg.value,
+      sub: perGuestSourceText(sources),
+    };
+    if (kpis.weekendPremium === null) {
+      byMetric.weekend = { ...byMetric.weekend, sub: "AirROIの実料金（平日・休前日）が無いため算出不可" };
+    } else if (sources.adr.source === "airroi") {
+      byMetric.weekend = { ...byMetric.weekend, sub: `${byMetric.weekend.sub}（AirROI実データ）` };
+    }
+  }
+
   const seg = KPI_SEGMENTS.find((s) => s.id === segment)!;
   return seg.metricIds.map((mid) => ({
     id: `${segment}:${mid}`,
@@ -194,17 +237,19 @@ export default function KpiCards({
   kpis,
   kpisTop20,
   kpisLumina,
+  luminaSources,
   visibleCards = [],
 }: {
   kpis: Kpis;
   kpisTop20: Kpis;
   kpisLumina: Kpis;
+  luminaSources?: LuminaSources;
   visibleCards?: string[];
 }) {
   const allCards: CardDef[] = [
     ...buildSegmentCards(kpis, "all"),
     ...buildSegmentCards(kpisTop20, "top"),
-    ...buildSegmentCards(kpisLumina, "own"),
+    ...buildSegmentCards(kpisLumina, "own", luminaSources),
   ];
   // 既定順: 指標ごとに全物件→上位20%のペア、最後にLumina群 (2列表示で左右に揃う)
   const defaultOrder = DEFAULT_KPI_ORDER;

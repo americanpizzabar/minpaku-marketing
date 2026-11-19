@@ -19,6 +19,11 @@ const DEFAULT_RATES_REFRESH_DAYS = Number(process.env.AIRROI_RATES_REFRESH_DAYS 
 const DEFAULT_DAILY_RATES_CALLS = Number(process.env.AIRROI_DAILY_RATES_CALLS ?? 40);
 const DEFAULT_LUMINA_LISTING_ID = cleanEnv(process.env.LUMINA_LISTING_ID) ?? "1628678015262671191";
 
+/** 設定画面で未入力のときの自物件リスティングID (環境変数 LUMINA_LISTING_ID → 既定値) */
+export function defaultLuminaListingId(): string {
+  return DEFAULT_LUMINA_LISTING_ID;
+}
+
 export interface SyncConfig {
   autoSync: boolean; // Vercel Cron による日次自動同期の有効/無効
   searchRefreshDays: number;
@@ -165,3 +170,139 @@ export async function saveSyncConfig(db: Client, config: Partial<SyncConfig>): P
 
 export const COST_PER_SEARCH_CALL = 0.5; // USD
 export const COST_PER_RATES_CALL = 0.1; // USD
+
+/* ------------------------------------------------------------------ */
+/* 自物件 (Lumina) の設定値の出所 (手入力 / AirROI) と日時                    */
+/* sync_state "config:lumina_field_meta" に JSON で保存する                */
+/* ------------------------------------------------------------------ */
+
+export const LUMINA_FIELD_META_KEY = "config:lumina_field_meta";
+
+/** 出所を記録する自物件の設定項目 (SyncConfig のキー名) */
+export const LUMINA_META_FIELDS = [
+  "luminaBasePrice",
+  "luminaBedrooms",
+  "luminaMaxGuests",
+  "luminaOccupancy",
+  "luminaRating",
+  "luminaReviews",
+  "luminaPhotos",
+  "luminaSuperhost",
+  "luminaAmenities",
+  "luminaLat",
+  "luminaLng",
+] as const;
+export type LuminaMetaField = (typeof LUMINA_META_FIELDS)[number];
+
+export interface LuminaFieldMetaEntry {
+  source: "manual" | "airroi";
+  /** 保存 (手入力) または取得 (AirROI) した日時 (ISO 8601, UTC) */
+  at: string;
+  /** AirROI 側のデータ時点 (YYYY-MM-DD)。分からなければ null */
+  dataDate?: string | null;
+}
+
+export type LuminaFieldMeta = Partial<Record<LuminaMetaField, LuminaFieldMetaEntry>>;
+
+/** 保存済みの JSON を検証して読む (壊れた値・未知の項目は捨てる。例外を投げない) */
+export function parseLuminaFieldMeta(raw: unknown): LuminaFieldMeta {
+  if (typeof raw !== "string" || raw.trim() === "") return {};
+  let v: unknown;
+  try {
+    v = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return {};
+  const out: LuminaFieldMeta = {};
+  for (const field of LUMINA_META_FIELDS) {
+    const e = (v as Record<string, unknown>)[field];
+    if (e === null || typeof e !== "object") continue;
+    const entry = e as Record<string, unknown>;
+    if (entry.source !== "manual" && entry.source !== "airroi") continue;
+    if (typeof entry.at !== "string" || Number.isNaN(new Date(entry.at).getTime())) continue;
+    out[field] = {
+      source: entry.source,
+      at: entry.at,
+      dataDate: typeof entry.dataDate === "string" ? entry.dataDate : null,
+    };
+  }
+  return out;
+}
+
+export async function getLuminaFieldMeta(db: Client): Promise<LuminaFieldMeta> {
+  try {
+    const res = await db.execute({
+      sql: "SELECT value FROM sync_state WHERE key = ?",
+      args: [LUMINA_FIELD_META_KEY],
+    });
+    return parseLuminaFieldMeta(res.rows[0]?.value);
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * 指定した項目の出所を記録する (他の項目の記録は残す)。entry が null ならその項目の記録を消す
+ * (値を空にした項目は「手入力」と表示しないため)。
+ */
+export async function markLuminaFields(
+  db: Client,
+  fields: readonly LuminaMetaField[],
+  entry: LuminaFieldMetaEntry | null,
+): Promise<LuminaFieldMeta> {
+  const meta = await getLuminaFieldMeta(db);
+  if (fields.length === 0) return meta;
+  for (const f of fields) {
+    if (entry === null) delete meta[f];
+    else meta[f] = { ...entry, dataDate: entry.dataDate ?? null };
+  }
+  await db.execute({
+    sql: `INSERT INTO sync_state (key, value) VALUES (?, ?)
+          ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+    args: [LUMINA_FIELD_META_KEY, JSON.stringify(meta)],
+  });
+  return meta;
+}
+
+/** 項目の値が「空」(未設定) か。空の項目には出所を表示しない */
+export function isLuminaFieldEmpty(config: SyncConfig, field: LuminaMetaField): boolean {
+  const v = config[field];
+  if (v === null || v === undefined) return true;
+  if (Array.isArray(v)) return v.length === 0;
+  if (field === "luminaBasePrice") return !(Number(v) > 0);
+  return false;
+}
+
+function fieldKey(config: SyncConfig, field: LuminaMetaField): string {
+  const v = config[field];
+  if (Array.isArray(v)) return v.join(",");
+  return v === null || v === undefined ? "" : String(v);
+}
+
+/** 保存の前後で値が実際に変わった項目 */
+export function changedLuminaFields(prev: SyncConfig, next: SyncConfig): LuminaMetaField[] {
+  return LUMINA_META_FIELDS.filter((f) => fieldKey(prev, f) !== fieldKey(next, f));
+}
+
+/**
+ * 手入力の保存: 値が変わった項目を「手入力・今」として記録し、空にした項目は記録を消す。
+ * 出所の記録は補助情報のため、失敗しても保存自体は失敗させない (ログのみ)。
+ */
+export async function recordManualLuminaEdits(
+  db: Client,
+  prev: SyncConfig,
+  next: SyncConfig,
+  now: Date = new Date(),
+): Promise<void> {
+  try {
+    const changed = changedLuminaFields(prev, next);
+    if (changed.length === 0) return;
+    const filled = changed.filter((f) => !isLuminaFieldEmpty(next, f));
+    const cleared = changed.filter((f) => isLuminaFieldEmpty(next, f));
+    if (filled.length > 0) await markLuminaFields(db, filled, { source: "manual", at: now.toISOString() });
+    if (cleared.length > 0) await markLuminaFields(db, cleared, null);
+  } catch (err) {
+    console.error("自物件の設定値の出所の記録に失敗:", err);
+  }
+}

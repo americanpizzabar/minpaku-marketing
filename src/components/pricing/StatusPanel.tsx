@@ -1,6 +1,7 @@
 "use client";
 
 import { type ReactNode, useState } from "react";
+import { formatJstMonthDay, parseTimestamp } from "@/lib/format";
 import type { PricingDashboard } from "@/lib/pricing/types";
 import {
   OWN_PRICE_SOURCE_LABEL,
@@ -41,6 +42,48 @@ function RefreshButton({
   return (
     <button type="button" onClick={handle} disabled={api.busy !== null} className={className}>
       {busy ? "取得中…" : `競合カレンダーを取得（${plan.count}件・約${usd(plan.costUsd)}）`}
+    </button>
+  );
+}
+
+/** 自社カレンダーが古いとみなす日数 (これより前の取得なら強調表示) */
+const OWN_CALENDAR_STALE_DAYS = 3;
+
+/** 自社カレンダー (AirROI) の取得日時の表示。基準時刻は画面データの生成時刻 (サーバー/クライアントで一致させる) */
+function OwnCalendarStatus({ d }: { d: PricingDashboard }) {
+  if (d.status.mode === "demo" || d.dataSource === "demo") return <>デモデータ</>;
+  const at = d.status.ownCalendarFetchedAt;
+  const fetched = parseTimestamp(at);
+  const label = formatJstMonthDay(at);
+  if (!fetched || !label) return <span className="font-semibold text-amber-700">AirROI 未取得（手入力・iCalのみ）</span>;
+  const ref = parseTimestamp(d.generatedAt) ?? fetched;
+  const ageDays = Math.floor((ref.getTime() - fetched.getTime()) / 86_400_000);
+  const stale = ageDays > OWN_CALENDAR_STALE_DAYS;
+  return (
+    <span className={stale ? "rounded bg-amber-100 px-1 font-semibold text-amber-800" : undefined}>
+      AirROI {label}取得{stale ? `（${ageDays}日前）` : ""}
+    </span>
+  );
+}
+
+/** 有料の自社カレンダー取得ボタン ($0.10/回) */
+function OwnCalendarButton({ api, onResult }: { api: PricingActions; onResult: (text: string) => void }) {
+  if (api.disabled) return null;
+  const busy = api.busy === "refreshOwnCalendar";
+  const handle = async () => {
+    if (
+      !window.confirm(
+        "自社カレンダー（掲載価格・予約状況）をAirROIから取得します。\n費用: 約$0.10（取得できなかった場合も課金されます）\n実行しますか？",
+      )
+    ) {
+      return;
+    }
+    const res = await api.run({ action: "refreshOwnCalendar" });
+    if (res) onResult(res.message);
+  };
+  return (
+    <button type="button" onClick={handle} disabled={api.busy !== null} className={buttonSecondary}>
+      {busy ? "取得中…" : "自社カレンダーを今すぐ取得（約$0.10）"}
     </button>
   );
 }
@@ -160,6 +203,9 @@ export function DataStatusBar({ d, api }: { d: PricingDashboard; api: PricingAct
           )}
         </Item>
         <Item label="自社価格の出所">{OWN_PRICE_SOURCE_LABEL[status.ownPriceSource]}</Item>
+        <Item label="自社カレンダー">
+          <OwnCalendarStatus d={d} />
+        </Item>
         <Item label="通知">
           {status.alertChannel === "webhook" ? "毎朝7:00に通知" : "通知なし（画面表示のみ）"}
         </Item>
@@ -170,9 +216,10 @@ export function DataStatusBar({ d, api }: { d: PricingDashboard; api: PricingAct
         </Item>
       </dl>
 
-      {!api.disabled && (status.refreshPlan.count > 0 || status.icalConfigured) && (
+      {!api.disabled && (
         <div className="flex flex-wrap gap-2">
           {status.mode !== "no_market_data" && <RefreshButton d={d} api={api} onResult={setResult} />}
+          <OwnCalendarButton api={api} onResult={setResult} />
           {status.icalConfigured && (
             <button type="button" onClick={importIcal} disabled={api.busy !== null} className={buttonSecondary}>
               {api.busy === "importIcal" ? "取り込み中…" : "iCal取り込み"}

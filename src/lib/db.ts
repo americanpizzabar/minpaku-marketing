@@ -1,4 +1,6 @@
 import { createClient, type Client } from "@libsql/client";
+import { LUMINA_RATES_LISTING_KEY, LUMINA_RATES_OK_KEY } from "./lumina-calendar";
+import { defaultLuminaListingId } from "./sync-config";
 
 let client: Client | null = null;
 
@@ -275,5 +277,104 @@ async function runSchemaMigrations(db: Client): Promise<void> {
     }
   } catch (err) {
     console.error("calendar_snapshots の初期バックフィルに失敗しました (次回再試行します):", err);
+  }
+  await migrateLuminaProvenance(db);
+}
+
+// 自物件カレンダー (lumina_fuji_metrics) の各値の出所。
+// price_source: 'airroi' = AirROI のカレンダーで観測した掲載価格 / 'base' = 手入力の基準価格で埋めた代替値 / NULL = 価格なし
+// price_observed_at: その価格を観測した日時 (UTC 'YYYY-MM-DD HH:MM:SS')。不明・基準価格なら NULL
+// status_source: 'airroi' = is_booked が AirROI のカレンダー由来 / NULL = 不明 (基準価格の代替行など)
+// fetched_at: この行の予約状況を AirROI から最後に取得した日時 (UTC)
+const LUMINA_PROVENANCE_COLUMNS: [string, string][] = [
+  ["price_source", "TEXT"],
+  ["price_observed_at", "TEXT"],
+  ["status_source", "TEXT"],
+  ["fetched_at", "TEXT"],
+];
+
+export const LUMINA_PROVENANCE_FLAG = "migration:lumina-provenance";
+
+/**
+ * lumina_fuji_metrics に出所の列を追加し、既存行を一度だけバックフィルする (成功後にフラグを立てる)。
+ * 既存行の判定: 前回取得が成功 (lumina_source='api') かつ価格 > 0 かつ基準価格と異なる → 'airroi'
+ * (観測日時は不明なので、遅くとも前回取得日時 lumina_rates_at とする)、
+ * それ以外で価格 > 0 → 'base' (AirROI が料金を返さない予約済みの日に、過去の失敗時の基準価格が残っているため)。
+ * 予約状況: lumina_source='api' のとき、前回取得 (lumina_rates_at) が返し得た日 (その UTC 日付以降。
+ * future/rates は今日以降しか返さず、UTC の日付は JST の日付以前なので取りこぼさない) は AirROI 由来・取得日時 = lumina_rates_at。
+ * それより前の日は、予約済み (失敗時の代替行は is_booked を立てない) か AirROI の実価格がある行だけを AirROI 由来とし
+ * (取得日時は不明 = NULL)、基準価格の代替行 (予約なし) は出所不明のまま残す (稼働率は手入力の設定値に戻る)。
+ * lumina_rates_ok_at / lumina_rates_listing_id (今の設定のリスティングID) が無ければ前回取得から補う。
+ * 表示を止めないため、ここでは例外を投げない (失敗時はフラグを立てず次のプロセスで再試行)。
+ */
+async function migrateLuminaProvenance(db: Client): Promise<void> {
+  for (const [name, type] of LUMINA_PROVENANCE_COLUMNS) {
+    try {
+      await db.execute(`ALTER TABLE lumina_fuji_metrics ADD COLUMN ${name} ${type}`);
+    } catch {
+      // 列が既に存在する場合は何もしない
+    }
+  }
+  try {
+    const done = await db.execute({
+      sql: "SELECT value FROM sync_state WHERE key = ?",
+      args: [LUMINA_PROVENANCE_FLAG],
+    });
+    if (done.rows.length > 0) return;
+    const stateRes = await db.execute(
+      "SELECT key, value FROM sync_state WHERE key IN ('lumina_source', 'lumina_rates_at', 'config:lumina_base_price', 'config:lumina_listing_id')",
+    );
+    const state = new Map(stateRes.rows.map((r) => [String(r.key), r.value === null ? null : String(r.value)]));
+    const wasApi = state.get("lumina_source") === "api";
+    const ratesAt = state.get("lumina_rates_at") || null;
+    const listingId = state.get("config:lumina_listing_id")?.trim() || defaultLuminaListingId();
+    const baseRaw = state.get("config:lumina_base_price");
+    const baseNum = Number(
+      baseRaw !== undefined && baseRaw !== null && baseRaw !== "" ? baseRaw : (process.env.LUMINA_BASE_PRICE ?? 0),
+    );
+    const basePrice = Number.isFinite(baseNum) && baseNum > 0 ? baseNum : null;
+    await db.batch(
+      [
+        {
+          sql: `UPDATE lumina_fuji_metrics SET price_source = CASE
+                  WHEN ? = 1 AND configured_price > 0 AND (? IS NULL OR configured_price <> ?) THEN 'airroi'
+                  WHEN configured_price > 0 THEN 'base'
+                  ELSE NULL END
+                WHERE price_source IS NULL`,
+          args: [wasApi ? 1 : 0, basePrice, basePrice],
+        },
+        {
+          sql: `UPDATE lumina_fuji_metrics SET price_observed_at = ?
+                WHERE price_source = 'airroi' AND price_observed_at IS NULL AND ? = 1`,
+          args: [ratesAt, wasApi ? 1 : 0],
+        },
+        {
+          // date(NULL) は NULL なので、前回取得日時が不明なら予約済み・実価格の行だけが対象 (取得日時 NULL)
+          sql: `UPDATE lumina_fuji_metrics SET status_source = 'airroi',
+                  fetched_at = CASE WHEN target_date >= date(?) THEN ? ELSE NULL END
+                WHERE status_source IS NULL AND ? = 1
+                  AND (target_date >= date(?) OR price_source = 'airroi' OR is_booked = 1)`,
+          args: [ratesAt, ratesAt, wasApi ? 1 : 0, ratesAt],
+        },
+        {
+          sql: `INSERT INTO sync_state (key, value) SELECT ?, ? WHERE ? = 1 AND ? IS NOT NULL
+                ON CONFLICT(key) DO NOTHING`,
+          args: [LUMINA_RATES_OK_KEY, ratesAt, wasApi ? 1 : 0, ratesAt],
+        },
+        {
+          sql: `INSERT INTO sync_state (key, value) SELECT ?, ? WHERE ? = 1
+                ON CONFLICT(key) DO NOTHING`,
+          args: [LUMINA_RATES_LISTING_KEY, listingId, wasApi ? 1 : 0],
+        },
+        {
+          sql: `INSERT INTO sync_state (key, value) VALUES (?, datetime('now'))
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+          args: [LUMINA_PROVENANCE_FLAG],
+        },
+      ],
+      "write",
+    );
+  } catch (err) {
+    console.error("lumina_fuji_metrics の出所のバックフィルに失敗しました (次回再試行します):", err);
   }
 }

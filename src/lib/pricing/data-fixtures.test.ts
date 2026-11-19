@@ -205,12 +205,26 @@ export async function seedRealistic(
     args: [LUMINA_LAT, LUMINA_LNG],
   });
 
-  // 自社: AirROI の実カレンダー (configured_price, is_booked)
+  // 自社: luminaSource "api" なら AirROI の実カレンダー (価格・予約状況とも出所 airroi)、
+  // "manual" なら取得失敗時の基準価格の代替行 (price_source 'base'、予約状況の出所なし)
+  const ownApi = (opts.luminaSource ?? "api") === "api";
   for (let i = -14; i <= 59; i++) {
     const date = addDaysStr(today, i);
+    const price = i % 10 === 0 ? 0 : 120000 + i;
     stmts.push({
-      sql: `INSERT INTO lumina_fuji_metrics (target_date, configured_price, is_booked) VALUES (?, ?, ?)`,
-      args: [date, i % 10 === 0 ? 0 : 120000 + i, i % 4 === 0 ? 1 : 0],
+      sql: `INSERT INTO lumina_fuji_metrics
+              (target_date, configured_price, is_booked, price_source, price_observed_at, status_source, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      args: ownApi
+        ? [date, price, i % 4 === 0 ? 1 : 0, price > 0 ? "airroi" : null, price > 0 ? "2026-01-01 00:00:00" : null, "airroi", "2026-01-01 00:00:00"]
+        : [date, price, 0, price > 0 ? "base" : null, null, null, null],
+    });
+  }
+  if (ownApi) {
+    stmts.push({
+      sql: `INSERT INTO sync_state (key, value) VALUES ('lumina_rates_ok_at', '2026-01-01 00:00:00')
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+      args: [],
     });
   }
   // 手動・iCal の予約状況 (優先順位の確認用)

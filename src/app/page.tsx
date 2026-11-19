@@ -4,6 +4,7 @@ import KpiCards from "@/components/KpiCards";
 import PropertyTable from "@/components/PropertyTable";
 import Sidebar from "@/components/Sidebar";
 import { getDashboardData, parseFilters } from "@/lib/analytics";
+import { luminaSeriesNote } from "@/lib/lumina-sources";
 
 export const dynamic = "force-dynamic";
 
@@ -49,6 +50,7 @@ export default async function DashboardPage({
           kpis={data.kpis}
           kpisTop20={data.kpisTop20}
           kpisLumina={data.kpisLumina}
+          luminaSources={data.luminaSources}
           visibleCards={data.visibleKpiCards}
         />
 
@@ -57,6 +59,7 @@ export default async function DashboardPage({
           trend={data.trend}
           benchmark={data.benchmark}
           capacityBars={data.capacityBars}
+          luminaNote={luminaSeriesNote(data.luminaSources.adr)}
         />
 
         <PropertyTable rows={data.rows} columnIds={data.visibleTableColumns} />

@@ -1,6 +1,20 @@
 import type { Client, InStatement } from "@libsql/client";
 import type { PropertyType } from "./types";
-import { COST_PER_RATES_CALL, COST_PER_SEARCH_CALL, saveSyncConfig, type SyncConfig } from "./sync-config";
+import {
+  COST_PER_RATES_CALL,
+  COST_PER_SEARCH_CALL,
+  LUMINA_META_FIELDS,
+  markLuminaFields,
+  saveSyncConfig,
+  type LuminaMetaField,
+  type SyncConfig,
+} from "./sync-config";
+import {
+  LUMINA_RATES_LISTING_KEY,
+  LUMINA_RATES_OK_KEY,
+  isForeignListing,
+  resetOwnCalendarStatements,
+} from "./lumina-calendar";
 
 /**
  * AirROI API クライアント (実機検証済みの仕様)
@@ -65,15 +79,49 @@ function parseJsonSafe<T>(text: string): T {
   return JSON.parse(quoted) as T;
 }
 
+/**
+ * AirROI へのリクエストの失敗。kind で課金の有無を判断できるようにする:
+ * - network: 応答を受け取れなかった (DNS・TLS・切断等。課金されていない可能性が高い)
+ * - http: エラー応答 (404 等。コールは消費される)
+ * - parse: 応答はあったが JSON として読めなかった (コールは消費される)
+ * メッセージは従来どおり (http は "AirROI API Error: <status> ..." の形)。
+ */
+export class AirRoiRequestError extends Error {
+  constructor(
+    message: string,
+    readonly kind: "network" | "http" | "parse",
+    readonly status: number | null = null,
+  ) {
+    super(message);
+    this.name = "AirRoiRequestError";
+  }
+}
+
 async function airRoiGet<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE_URL}${path}`, {
-    headers: { "x-api-key": apiKeyOrThrow(), Accept: "application/json" },
-  });
+  const apiKey = apiKeyOrThrow();
+  let res: Response;
+  try {
+    res = await fetch(`${BASE_URL}${path}`, {
+      headers: { "x-api-key": apiKey, Accept: "application/json" },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new AirRoiRequestError(`AirROI network error (GET ${path}): ${msg}`, "network");
+  }
   const text = await res.text().catch(() => "");
   if (!res.ok) {
-    throw new Error(`AirROI API Error: ${res.status} ${res.statusText} (GET ${path}) ${text.slice(0, 300)}`);
+    throw new AirRoiRequestError(
+      `AirROI API Error: ${res.status} ${res.statusText} (GET ${path}) ${text.slice(0, 300)}`,
+      "http",
+      res.status,
+    );
   }
-  return parseJsonSafe<T>(text);
+  try {
+    return parseJsonSafe<T>(text);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new AirRoiRequestError(`AirROI invalid response (GET ${path}): ${msg}`, "parse", res.status);
+  }
 }
 
 async function airRoiPost<T>(path: string, body: unknown): Promise<T> {
@@ -405,24 +453,79 @@ export interface SyncStepResult {
   error?: string;
 }
 
+/** UTC の 'YYYY-MM-DD HH:MM:SS' (SQLite の datetime('now') と同じ形式) */
+function utcStamp(d: Date = new Date()): string {
+  return d.toISOString().slice(0, 19).replace("T", " ");
+}
+
+/** 自社カレンダー取得の失敗の種類 (empty = 200 だが日別の料金が1日も無かった) */
+export type LuminaRatesFailure = "network" | "http" | "parse" | "empty" | "other";
+
+export const LUMINA_EMPTY_CALENDAR_ERROR = "AirROI returned an empty calendar";
+
+export interface LuminaRatesResult {
+  records: number;
+  /** AirROI から応答を受け取ったか (404・空のカレンダーでもコールは消費される = 課金対象。通信エラーは false) */
+  usedApi: boolean;
+  /** 失敗の種類 (成功なら undefined) */
+  failure?: LuminaRatesFailure;
+  /** エラー応答の HTTP ステータス (http のとき) */
+  httpStatus?: number | null;
+  /** AirROI からカレンダーを取得できたか */
+  ok: boolean;
+  /** 取得日時 (UTC 'YYYY-MM-DD HH:MM:SS') */
+  fetchedAt: string;
+  /** 取得できた日のうち、掲載価格があった日数 / 予約済み・ブロックの日数 */
+  pricedDays: number;
+  bookedDays: number;
+  /** 取得に失敗した場合の理由 (サーバーログ用の原文。画面には要約を出す) */
+  error?: string;
+}
+
 /**
- * 自物件 (Lumina Fuji) の料金カレンダーを lumina_fuji_metrics に取り込む。
- * AirROI未収録 (404) の場合は、設定された基準価格で今後365日を埋める
- * (実データが取れるようになれば自動的に上書きされる)。
+ * 自物件 (Lumina Fuji) の料金カレンダーを lumina_fuji_metrics に取り込む。各行に値の出所を記録する:
+ * - 取得成功: 予約可能で有効な料金 (外れ値上限以内) がある日 → configured_price=料金, price_source='airroi',
+ *   price_observed_at=今。それ以外 (予約済み・ブロック・料金なし) の日は、既存の価格が AirROI で観測した
+ *   ものならその価格と観測日時を残し (最後に掲載されていた実価格)、そうでなければ価格 0・price_source NULL
+ *   (AirROI は予約済みの日の料金を返さないため、基準価格の代替値を実データとして残さない)。
+ *   予約状況は常に AirROI の値で更新し status_source='airroi', fetched_at=今。
+ *   sync_state: lumina_rates_ok_at (最後に成功した取得), lumina_rates_listing_id (取得したリスティングID),
+ *   lumina_rates_at (最後の試行), lumina_source='api'。
+ * - 取得失敗 (AirROI未収録の 404・通信エラー・読めない応答・200 だが日別の料金が1日も無い空のカレンダー):
+ *   基準価格が設定されていれば今後365日を基準価格で埋める (price_source='base')。ただし AirROI で観測した価格の行は
+ *   上書きせず、予約状況 (is_booked/status_source) にも触れない。sync_state: lumina_rates_at, lumina_source='manual'
+ *   (lumina_rates_ok_at は進めない)。usedApi は応答を受け取ったときだけ true (通信エラーは課金されていない可能性が高い)。
+ * - 保存済みの AirROI 由来の行が別のリスティングID (lumina_rates_listing_id) のものなら、取り込む前に実データから外す。
  */
-export async function refreshLuminaRates(
-  db: Client,
-  config: SyncConfig,
-): Promise<{ records: number; usedApi: boolean }> {
+export async function refreshLuminaRates(db: Client, config: SyncConfig): Promise<LuminaRatesResult> {
   const stmts: InStatement[] = [];
   let usedApi = false;
-  let source = "api";
+  let ok = true;
+  let failure: LuminaRatesFailure | undefined;
+  let httpStatus: number | null = null;
+  let error: string | undefined;
+  let records = 0;
+  let pricedDays = 0;
+  let bookedDays = 0;
+  const now = utcStamp();
+
+  // 保存済みの AirROI 由来の行が別のリスティングのものなら、実データから外してから取り込む
+  // (失敗時に前のリスティングの価格・予約状況が新しいリスティングの実データとして残らないように)
+  const storedListingRes = await db.execute({
+    sql: "SELECT value FROM sync_state WHERE key = ?",
+    args: [LUMINA_RATES_LISTING_KEY],
+  });
+  const storedListing = storedListingRes.rows[0]?.value;
+  if (isForeignListing(storedListing === null || storedListing === undefined ? null : String(storedListing), config.luminaListingId)) {
+    stmts.push(...resetOwnCalendarStatements());
+  }
 
   try {
     const ratesRes = await airRoiGet<FutureRatesResponse>(
       `/listings/future/rates?id=${encodeURIComponent(config.luminaListingId)}&currency=native`,
     );
     usedApi = true;
+    const upserts: InStatement[] = [];
     const luminaCap = outlierCapOf(ratesRes.rates ?? []);
     for (const day of ratesRes.rates ?? []) {
       if (!day.date) continue;
@@ -430,59 +533,110 @@ export async function refreshLuminaRates(
       const available = Boolean(day.available);
       const price =
         available && rawPrice !== null && rawPrice > 0 && rawPrice <= luminaCap ? rawPrice : 0;
-      stmts.push({
-        sql: `INSERT INTO lumina_fuji_metrics (target_date, configured_price, is_booked)
-              VALUES (?, ?, ?)
+      if (price > 0) pricedDays += 1;
+      if (!available) bookedDays += 1;
+      // SQLite の UPDATE の SET 式は更新前の行の値を参照する (列の評価順に依存しない)
+      upserts.push({
+        sql: `INSERT INTO lumina_fuji_metrics
+                (target_date, configured_price, is_booked, price_source, price_observed_at, status_source, fetched_at)
+              VALUES (?, ?, ?, ?, ?, 'airroi', ?)
               ON CONFLICT(target_date) DO UPDATE SET
-                configured_price=CASE WHEN excluded.configured_price > 0 THEN excluded.configured_price ELSE lumina_fuji_metrics.configured_price END,
-                is_booked=excluded.is_booked`,
-        args: [String(day.date).slice(0, 10), price, available ? 0 : 1],
+                configured_price=CASE
+                  WHEN excluded.price_source = 'airroi' THEN excluded.configured_price
+                  WHEN lumina_fuji_metrics.price_source = 'airroi' THEN lumina_fuji_metrics.configured_price
+                  ELSE 0 END,
+                price_observed_at=CASE
+                  WHEN excluded.price_source = 'airroi' THEN excluded.price_observed_at
+                  WHEN lumina_fuji_metrics.price_source = 'airroi' THEN lumina_fuji_metrics.price_observed_at
+                  ELSE NULL END,
+                price_source=CASE
+                  WHEN excluded.price_source = 'airroi' OR lumina_fuji_metrics.price_source = 'airroi' THEN 'airroi'
+                  ELSE NULL END,
+                is_booked=excluded.is_booked,
+                status_source='airroi',
+                fetched_at=excluded.fetched_at`,
+        args: [
+          String(day.date).slice(0, 10),
+          price,
+          available ? 0 : 1,
+          price > 0 ? "airroi" : null,
+          price > 0 ? now : null,
+          now,
+        ],
       });
+      records += 1;
     }
+    if (records === 0) {
+      // 200 でも日別の料金が1日も無ければ取得できていない (コールは消費済み)。最終成功日時は進めない
+      pricedDays = 0;
+      bookedDays = 0;
+      failure = "empty";
+      throw new Error(LUMINA_EMPTY_CALENDAR_ERROR);
+    }
+    stmts.push(...upserts);
+    stmts.push({
+      sql: `INSERT INTO sync_state (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+      args: [LUMINA_RATES_OK_KEY, now],
+    });
+    stmts.push({
+      sql: `INSERT INTO sync_state (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+      args: [LUMINA_RATES_LISTING_KEY, config.luminaListingId],
+    });
   } catch (err) {
-    usedApi = true; // 404でもコールは消費されている
-    source = "manual";
+    ok = false;
+    records = 0;
+    if (!failure) {
+      if (err instanceof AirRoiRequestError) {
+        failure = err.kind;
+        httpStatus = err.status;
+      } else {
+        failure = "other";
+      }
+    }
+    // 応答を受け取っていれば (404・読めない応答・空のカレンダーでも) コールは消費されている。
+    // 通信エラー (応答なし) は課金されていない可能性が高い
+    usedApi =
+      usedApi || (err instanceof AirRoiRequestError && (err.kind === "http" || err.kind === "parse"));
+    error = err instanceof Error ? err.message : String(err);
     console.error(`AirROI: Lumina Fuji (${config.luminaListingId}) の料金取得に失敗:`, err);
     if (config.luminaBasePrice > 0) {
-      // フォールバック: 基準価格で今後365日を埋める。
-      // 前回がAPI実データの場合のみ既存価格を保持し、旧基準価格は新しい値で上書きする。
-      const prevSourceRes = await db.execute(
-        "SELECT value FROM sync_state WHERE key = 'lumina_source'",
-      );
-      const prevWasApi = prevSourceRes.rows[0] && String(prevSourceRes.rows[0].value) === "api";
+      // フォールバック: 基準価格で今後365日を埋める (AirROI で観測した価格の行は残す)
       console.log(`AirROI: 基準価格 ¥${config.luminaBasePrice} でベンチマークを生成します`);
       const today = new Date();
       for (let i = 0; i < 365; i++) {
         const d = new Date(today.getTime() + i * 86400_000);
         stmts.push({
-          sql: prevWasApi
-            ? `INSERT INTO lumina_fuji_metrics (target_date, configured_price, is_booked)
-               VALUES (?, ?, 0)
-               ON CONFLICT(target_date) DO UPDATE SET
-                 configured_price=CASE WHEN lumina_fuji_metrics.configured_price > 0 THEN lumina_fuji_metrics.configured_price ELSE excluded.configured_price END`
-            : `INSERT INTO lumina_fuji_metrics (target_date, configured_price, is_booked)
-               VALUES (?, ?, 0)
-               ON CONFLICT(target_date) DO UPDATE SET
-                 configured_price=excluded.configured_price`,
+          sql: `INSERT INTO lumina_fuji_metrics (target_date, configured_price, is_booked, price_source)
+                VALUES (?, ?, 0, 'base')
+                ON CONFLICT(target_date) DO UPDATE SET
+                  configured_price=CASE WHEN lumina_fuji_metrics.price_source = 'airroi'
+                    THEN lumina_fuji_metrics.configured_price ELSE excluded.configured_price END,
+                  price_observed_at=CASE WHEN lumina_fuji_metrics.price_source = 'airroi'
+                    THEN lumina_fuji_metrics.price_observed_at ELSE NULL END,
+                  price_source=CASE WHEN lumina_fuji_metrics.price_source = 'airroi' THEN 'airroi' ELSE 'base' END`,
           args: [d.toISOString().slice(0, 10), config.luminaBasePrice],
         });
+        records += 1;
       }
     }
   }
 
+  // 最後の試行日時 (失敗・空のカレンダーでも進め、syncStep が同じ周期内に再度課金しないようにする)
   stmts.push({
-    sql: `INSERT INTO sync_state (key, value) VALUES ('lumina_rates_at', datetime('now'))
+    sql: `INSERT INTO sync_state (key, value) VALUES ('lumina_rates_at', ?)
           ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
-    args: [],
+    args: [now],
   });
-  // データの出所 (api=実データ / manual=基準価格フォールバック) を分析側へ伝える
+  // 直近の取得結果 (api=実データ取得成功 / manual=取得失敗で基準価格フォールバック)
   stmts.push({
     sql: `INSERT INTO sync_state (key, value) VALUES ('lumina_source', ?)
           ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
-    args: [source],
+    args: [ok ? "api" : "manual"],
   });
   await db.batch(stmts, "write");
-  return { records: stmts.length - 2, usedApi };
+  return { records, usedApi, ok, failure, httpStatus, fetchedAt: now, pricedDays, bookedDays, error };
 }
 
 /** GET /listings?id=<id> で取得できる自物件スペック (抽出後) */
@@ -732,6 +886,15 @@ export async function refreshLuminaSpecs(
   }
 
   await saveSyncConfig(db, patch);
+  // 取得値で更新した項目は「AirROI・今取得」として記録する (画面で手入力と区別するため)
+  const patchedFields = (Object.keys(patch) as (keyof SyncConfig)[]).filter((k): k is LuminaMetaField =>
+    (LUMINA_META_FIELDS as readonly string[]).includes(k),
+  );
+  await markLuminaFields(db, patchedFields, {
+    source: "airroi",
+    at: new Date().toISOString(),
+    dataDate: specs.dataDate,
+  }).catch((err) => console.error("AirROI: 自物件スペックの出所の記録に失敗:", err));
   await recordLuminaSpecLastFetch(db, {
     at: new Date().toISOString(),
     listingId: config.luminaListingId || null,

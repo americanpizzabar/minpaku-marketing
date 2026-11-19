@@ -7,6 +7,7 @@
 import type { Client, InValue, Row } from "@libsql/client";
 import { toDateStr, todayJst } from "../dates";
 import { ensureSchema, getDb } from "../db";
+import { getOwnCalendarState } from "../lumina-calendar";
 import { getSyncConfig } from "../sync-config";
 import { selectCompSet } from "./compset";
 import { DEFAULT_PRICING_CONFIG, normalizePricingConfig } from "./config";
@@ -114,9 +115,14 @@ async function loadContext(db: Client): Promise<LoadContext> {
  *   calendar_snapshots (snapshot_date >= today−120, target_date ∈ [today−24, today+horizon+7])
  *   (basePrice = config.basePriceWeekday ?? lumina.basePrice)
  * - own: date ∈ [today−14, today+horizon] ごとに
- *     apiPrice = lumina.priceSource == "api" かつ lumina_fuji_metrics.configured_price > 0 ならその値、それ以外 null
+ *     apiPrice = lumina_fuji_metrics.price_source == 'airroi' かつ configured_price > 0 ならその値、それ以外 null
+ *       (基準価格で埋めた代替値 'base' は実価格として扱わない。直近の取得が失敗していても、過去に AirROI で
+ *        観測した価格は実データとして使う)
  *     status/statusSource の優先順: lumina_bookings(source=manual, status は booked/blocked/vacant) >
- *       lumina_bookings(source=ical) > (priceSource "api" かつ is_booked=1 → booked/api) > vacant/none
+ *       lumina_bookings(source=ical) > (status_source = 'airroi' の行: is_booked=1 → booked/api, 0 → vacant/api) > vacant/none
+ * - ownCalendarFetchedAt = MAX(lumina_fuji_metrics.fetched_at) (status_source = 'airroi' の行) → 無ければ
+ *   sync_state "lumina_rates_ok_at"。sync_state "lumina_rates_listing_id" が今のリスティングIDと異なれば null で、
+ *   AirROI 由来の行は own に使わない (lumina-calendar.ts getOwnCalendarState)
  * - icalConfigured = config.icalUrl != null
  * - icalLastImport = sync_state "pricing:ical_last_import" の JSON (IcalImportStatus)。無ければ null
  * - alertChannel = process.env.ALERT_WEBHOOK_URL が空でなければ "webhook"、それ以外 "none"
@@ -206,7 +212,7 @@ export async function loadPricingInputs(db: Client | null = getDb()): Promise<Pr
   // --- own (自社の予約状況・現在価格) ---
   const [metricsRes, bookingsRes, icalRes, notifiedRes] = await Promise.all([
     db.execute({
-      sql: `SELECT target_date, configured_price, is_booked FROM lumina_fuji_metrics
+      sql: `SELECT target_date, configured_price, is_booked, price_source, status_source FROM lumina_fuji_metrics
             WHERE target_date BETWEEN ? AND ?`,
       args: [ownFrom, ownTo],
     }),
@@ -220,7 +226,11 @@ export async function loadPricingInputs(db: Client | null = getDb()): Promise<Pr
        WHERE notified_at IS NOT NULL AND notified_at <> 'skipped' AND notified_at NOT LIKE 'sending:%'`,
     ),
   ]);
-  const own = buildOwnDays(ownFrom, ownTo, lumina.priceSource, metricsRes.rows, bookingsRes.rows);
+  // 自社カレンダーの AirROI 取得日時は保存されている AirROI 由来の行から求める (取得失敗で日付が消えないように)。
+  // 別のリスティングで取得した行は実価格・実予約として使わない
+  const ownCalendar = await getOwnCalendarState(db, lumina.listingId);
+  const own = buildOwnDays(ownFrom, ownTo, metricsRes.rows, bookingsRes.rows, ownCalendar.foreignListing);
+  const ownCalendarFetchedAt = ownCalendar.fetchedAt;
 
   return {
     today,
@@ -235,6 +245,7 @@ export async function loadPricingInputs(db: Client | null = getDb()): Promise<Pr
     icalLastImport: parseIcalStatus(icalRes.rows[0]?.value),
     alertChannel: cleanEnv(process.env.ALERT_WEBHOOK_URL) ? "webhook" : "none",
     lastNotifiedAt: strOrNull(notifiedRes.rows[0]?.m),
+    ownCalendarFetchedAt,
   };
 }
 
@@ -259,15 +270,18 @@ function parseIcalStatus(raw: unknown): IcalImportStatus | null {
 function buildOwnDays(
   from: string,
   to: string,
-  priceSource: LuminaInputs["priceSource"],
   metricsRows: Row[],
   bookingRows: Row[],
+  foreignListing = false,
 ): OwnDay[] {
-  const metrics = new Map<string, { price: number | null; booked: boolean }>();
-  for (const r of metricsRows) {
+  // AirROI で観測した値だけを使う (基準価格で埋めた代替行の価格・予約状況は実データではない)。
+  // 別のリスティングで取得した行 (foreignListing) は使わない
+  const metrics = new Map<string, { price: number | null; booked: boolean | null }>();
+  for (const r of foreignListing ? [] : metricsRows) {
+    const price = numOrNull(r.configured_price);
     metrics.set(String(r.target_date).slice(0, 10), {
-      price: numOrNull(r.configured_price),
-      booked: truthy(r.is_booked),
+      price: strOrNull(r.price_source) === "airroi" && price !== null && price > 0 ? price : null,
+      booked: strOrNull(r.status_source) === "airroi" ? truthy(r.is_booked) : null,
     });
   }
   const manual = new Map<string, OwnStatus>();
@@ -286,8 +300,8 @@ function buildOwnDays(
   const n = diffDays(from, to);
   for (let i = 0; i <= n; i++) {
     const date = addDaysStr(from, i);
-    const m = priceSource === "api" ? metrics.get(date) : undefined;
-    const apiPrice = m && m.price !== null && m.price > 0 ? m.price : null;
+    const m = metrics.get(date);
+    const apiPrice = m?.price ?? null;
     let status: OwnStatus = "vacant";
     let statusSource: OwnStatusSource = "none";
     const manualStatus = manual.get(date);
@@ -298,7 +312,7 @@ function buildOwnDays(
     } else if (icalStatus) {
       status = icalStatus;
       statusSource = "ical";
-    } else if (m) {
+    } else if (m && m.booked !== null) {
       // AirROI の実カレンダーがある日は、予約不可なら booked、予約可能なら vacant (いずれも出所 api)
       status = m.booked ? "booked" : "vacant";
       statusSource = "api";

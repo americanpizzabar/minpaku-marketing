@@ -117,6 +117,36 @@ export interface LuminaMetric {
   configuredPrice: number;
   isBooked: boolean;
   actualRevenue: number;
+  /** 価格の出所: airroi = AirROI のカレンダーで観測した掲載価格 / base = 手入力の基準価格で埋めた代替値 /
+   *  demo = デモデータ / null = 価格なし (予約済みで料金が出ない日など) */
+  priceSource: "airroi" | "base" | "demo" | null;
+  priceObservedAt: string | null; // 価格を観測した日時 (UTC 'YYYY-MM-DD HH:MM:SS')。不明なら null
+  /** 予約状況の出所: airroi = AirROI のカレンダー / demo = デモデータ / null = 不明 (使わない) */
+  statusSource: "airroi" | "demo" | null;
+  fetchedAt: string | null; // この日の予約状況を AirROI から取得した日時 (UTC)
+}
+
+/**
+ * 自物件の KPI 値の出所。
+ * source: airroi = AirROI の実データ / manual = 手入力の設定値 / demo = デモデータ / none = データなし
+ * basis: calendar = 日別の AirROI カレンダー / setting = 設定画面の値 (基準価格・稼働率)
+ * asOf: 実データは AirROI の取得日時、設定値は保存 (または AirROI から取得) した日時。分からなければ null
+ *   (UTC 'YYYY-MM-DD HH:MM:SS' または ISO 8601)
+ * days: 算出に使った日数 (calendar のとき)
+ */
+export interface LuminaValueSource {
+  source: "airroi" | "manual" | "demo" | "none";
+  basis: "calendar" | "setting" | null;
+  asOf: string | null;
+  days: number;
+}
+
+export interface LuminaSources {
+  adr: LuminaValueSource;
+  occupancy: LuminaValueSource;
+  pacing: LuminaValueSource;
+  /** 定員 (1人当たり単価の分母) の出所 */
+  maxGuests: LuminaValueSource;
 }
 
 // ---- 集計結果 ----
@@ -245,6 +275,7 @@ export interface DashboardData {
   kpis: Kpis;
   kpisTop20: Kpis; // ADR上位20% (ハイエンド層) のみで再計算した同指標
   kpisLumina: Kpis; // Lumina Fuji 単体の同指標
+  luminaSources: LuminaSources; // kpisLumina の各値の出所 (実データか手入力か・いつの値か)
   visibleKpiCards: string[]; // 設定画面で選択された表示カードID (空 = 全て表示)
   visibleTableColumns: string[]; // 競合物件一覧の表示列ID (空 = 既定列)
   dataMode: DataBasis; // 全体のデータ取得モード (actual=実績ベース / calendar=全物件カレンダー)

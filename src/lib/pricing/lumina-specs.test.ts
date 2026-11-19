@@ -173,3 +173,27 @@ describe("refreshLuminaSpecs: AirROI のデータの新旧", () => {
     assert.equal((await getLuminaSpecLastFetch(db))?.dataDate, null);
   });
 });
+
+describe("refreshLuminaSpecs: AirROI 未収録 (本番の事象)", () => {
+  it("詳細エンドポイントが 404 なら値は変えず、未収録だったことを記録して手入力を案内する", async () => {
+    const db = await setup({ rating: 4.93, reviews: 15 });
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          message: "Listing not found. This may be due to an invalid ID, or the listing has not been added to our system.",
+        }),
+        { status: 404, statusText: "Not Found" },
+      )) as typeof fetch;
+    const r = await refreshLuminaSpecs(db, await getSyncConfig(db));
+    assert.equal(r.ok, false);
+    assert.equal(r.notFound, true);
+    assert.match(r.message, /AirROIにまだ収録されていないため自動取得できません/);
+    assert.match(r.message, /手入力して「保存」してください/);
+    const cfg = await getSyncConfig(db);
+    assert.equal(cfg.luminaRating, 4.93);
+    assert.equal(cfg.luminaReviews, 15);
+    const last = await getLuminaSpecLastFetch(db, "1628678015262671191");
+    assert.equal(last?.notFound, true);
+    assert.equal(last?.rating, null);
+  });
+});

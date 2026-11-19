@@ -87,7 +87,10 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
     reviews: number | null;
     dataDate: string | null;
     keptReason: "older" | "unknownCount" | null;
+    notFound: boolean;
   } | null>(null);
+  // 自動取得ボタンの結果 (ボタンのすぐ下に出す。画面下部のメッセージはスマホでは見えないため)
+  const [specsResult, setSpecsResult] = useState<{ text: string; tone: "info" | "error" } | null>(null);
 
   useEffect(() => {
     if (!open || form) return;
@@ -143,6 +146,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
     }
     setFetchingSpecs(true);
     setMessage(null);
+    setSpecsResult(null);
     setMessageTone("info");
     try {
       const res = await fetch("/api/settings", {
@@ -153,12 +157,15 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
       const json = await res.json();
       if (json.config) setForm(toFormState(json.config));
       if (json.luminaSpecsLastFetch !== undefined) setSpecsLastFetch(json.luminaSpecsLastFetch);
+      const text: string = json.message ?? json.error ?? (json.saved ? "取得しました" : "取得に失敗しました");
       setMessageTone(json.saved ? "info" : "error");
-      setMessage(json.message ?? json.error ?? (json.saved ? "取得しました" : "取得に失敗しました"));
+      setMessage(text);
+      setSpecsResult({ text, tone: json.saved ? "info" : "error" });
       if (json.saved) router.refresh();
     } catch {
       setMessageTone("error");
       setMessage("スペック取得リクエストに失敗しました");
+      setSpecsResult({ text: "スペック取得リクエストに失敗しました", tone: "error" });
     } finally {
       setFetchingSpecs(false);
     }
@@ -445,7 +452,24 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                   （AirROIのレビュー数が保存済みより少ないときは古いデータの可能性があるため、評価・レビュー数を上書きしません）。
                   自物件がAirROI未収録の場合は取得できませんが、その際もデータ同期のたびに自動で再取得を試み、収録され次第この欄に反映されます。
                 </p>
-                {specsLastFetch && (
+                {specsResult && (
+                  <p
+                    role="status"
+                    className={`mb-2 rounded-md px-2 py-1.5 text-[11px] leading-relaxed ${
+                      specsResult.tone === "error" ? "bg-rose-50 text-rose-800" : "bg-emerald-50 text-emerald-800"
+                    }`}
+                  >
+                    {specsResult.text}
+                  </p>
+                )}
+                {specsLastFetch && !specsResult && specsLastFetch.notFound && (
+                  <p className="mb-2 rounded-md bg-amber-50 px-2 py-1.5 text-[11px] leading-relaxed text-amber-900">
+                    前回の取得:{" "}
+                    {new Date(specsLastFetch.at).toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo", month: "numeric", day: "numeric" })}
+                    {" "}— この物件の詳細はAirROIに未収録のため取得できませんでした。評価・レビュー数などは下の欄に手入力して保存してください。
+                  </p>
+                )}
+                {specsLastFetch && !specsResult && !specsLastFetch.notFound && (
                   <p
                     className={`mb-2 rounded-md px-2 py-1.5 text-[11px] leading-relaxed ${
                       specsLastFetch.keptReason ? "bg-amber-50 text-amber-900" : "bg-white text-slate-600"

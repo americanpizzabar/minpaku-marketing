@@ -514,6 +514,8 @@ export interface LuminaSpecLastFetch {
    *  unknownCount = AirROI にレビュー数が無く新旧を判断できない。上書きしたなら null */
   keptReason: "older" | "unknownCount" | null;
   keptNewer: boolean; // keptReason != null (互換用)
+  /** AirROI の詳細エンドポイントにこの物件が未収録 (404) だった。値は取得できていない */
+  notFound: boolean;
 }
 
 export const LUMINA_SPECS_LAST_FETCH_KEY = "lumina_specs_last_fetch";
@@ -571,10 +573,21 @@ export async function getLuminaSpecLastFetch(
       dataDate: typeof v.dataDate === "string" ? v.dataDate : null,
       keptReason,
       keptNewer: keptReason !== null,
+      notFound: v.notFound === true,
     };
   } catch {
     return null;
   }
+}
+
+async function recordLuminaSpecLastFetch(db: Client, v: LuminaSpecLastFetch): Promise<void> {
+  await db
+    .execute({
+      sql: `INSERT INTO sync_state (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+      args: [LUMINA_SPECS_LAST_FETCH_KEY, JSON.stringify(v)],
+    })
+    .catch((err) => console.error("AirROI: 自物件スペックの取得結果の記録に失敗:", err));
 }
 
 /**
@@ -656,11 +669,24 @@ export async function refreshLuminaSpecs(
     // AirROIにこの物件が未収録 (404 / not found / not been added) の場合は
     // 手入力での登録を促す、原因が分かるメッセージを返す
     if (/\b404\b|not found|not been added|listing not found/i.test(message)) {
+      // 画面に「前回の取得: 未収録」と残し、押しても同じ結果になることが分かるようにする
+      await recordLuminaSpecLastFetch(db, {
+        at: new Date().toISOString(),
+        listingId: config.luminaListingId || null,
+        rating: null,
+        reviews: null,
+        dataDate: null,
+        keptReason: null,
+        keptNewer: false,
+        notFound: true,
+      });
       return {
         ok: false,
         fetched: null,
         notFound: true,
-        message: `この物件 (ID: ${config.luminaListingId}) はAirROIにまだ収録されていないため自動取得できません。IDが正しいかご確認のうえ、当面は下記の各項目を手入力で登録してください (AirROIが収録すれば自動取得も使えます)。`,
+        message:
+          `この物件 (ID: ${config.luminaListingId}) の詳細（評価・レビュー数など）はAirROIにまだ収録されていないため自動取得できません` +
+          "（料金カレンダーは別の仕組みで取得できています）。評価・レビュー数などは下の欄に手入力して「保存」してください。AirROIが収録すれば自動取得も使えます。",
       };
     }
     return { ok: false, fetched: null, message: `取得に失敗しました: ${message.slice(0, 200)}` };
@@ -706,7 +732,7 @@ export async function refreshLuminaSpecs(
   }
 
   await saveSyncConfig(db, patch);
-  const lastFetch: LuminaSpecLastFetch = {
+  await recordLuminaSpecLastFetch(db, {
     at: new Date().toISOString(),
     listingId: config.luminaListingId || null,
     rating: specs.rating,
@@ -714,14 +740,8 @@ export async function refreshLuminaSpecs(
     dataDate: specs.dataDate,
     keptReason,
     keptNewer: keptReason !== null,
-  };
-  await db
-    .execute({
-      sql: `INSERT INTO sync_state (key, value) VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
-      args: [LUMINA_SPECS_LAST_FETCH_KEY, JSON.stringify(lastFetch)],
-    })
-    .catch((err) => console.error("AirROI: 自物件スペックの取得結果の記録に失敗:", err));
+    notFound: false,
+  });
 
   const asOf = specs.dataDate ? `（AirROIのデータ時点 ${specs.dataDate}）` : "";
   const others: string[] = [];

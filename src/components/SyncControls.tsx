@@ -44,7 +44,7 @@ export default function SyncControls() {
     <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
       <h3 className="text-sm font-bold text-slate-900">データ手動更新</h3>
       <p className="mt-1 text-xs text-slate-500">
-        AirROI APIから最新の料金カレンダーを取得します（設定した取得上限の範囲で料金が発生／フィルタや検索の操作では料金は一切かかりません）。
+        AirROI APIから料金カレンダーを取得します。対象は「料金カレンダーの更新周期」より前に取得した物件だけで、周期内の物件しか無ければ取得せず料金も発生しません（設定した取得上限の範囲で料金が発生／フィルタや検索の操作では料金は一切かかりません）。
         エリア検索カタログの再取得（約$25）はこのボタンでは行わず、設定の「物件情報を今すぐ更新」で明示的に実行します。
       </p>
       <button

@@ -976,6 +976,52 @@ export async function selectRatesSubsetIds(db: Client, config: SyncConfig): Prom
   return res.rows.map((r) => String(r.id));
 }
 
+/** UTC の 'YYYY-MM-DD HH:MM:SS' に日数を足し、日本時間の M/D にする */
+function jstMdAfter(utc: string, days: number): string | null {
+  const t = Date.parse(utc.replace(" ", "T") + (/[zZ]|[+-]\d\d:?\d\d$/.test(utc) ? "" : "Z"));
+  if (!Number.isFinite(t)) return null;
+  const d = new Date(t + days * 86_400_000 + 9 * 3_600_000);
+  return `${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
+}
+
+/**
+ * 同期で料金カレンダーを1件も取得しなかったときの説明。
+ * 対象 (自物件 + 実績ベースなら近似競合のサブセット) がすべて更新周期 (ratesRefreshDays) 以内なら、
+ * 最も古い取得日 + 周期 = 次に更新対象になる日を示す。
+ */
+async function nothingDueMessage(
+  db: Client,
+  config: SyncConfig,
+  subsetClause: string,
+  subsetArgs: string[],
+): Promise<string | undefined> {
+  try {
+    const oldestRes = await db.execute({
+      sql: `SELECT MIN(rates_synced_at) AS m FROM properties
+            WHERE id LIKE 'airroi_%' AND rates_synced_at IS NOT NULL${subsetClause}`,
+      args: subsetArgs,
+    });
+    const candidates: string[] = [];
+    const oldest = oldestRes.rows[0]?.m;
+    if (oldest !== null && oldest !== undefined) candidates.push(String(oldest));
+    if (config.luminaListingId) {
+      const lr = await db.execute("SELECT value FROM sync_state WHERE key = 'lumina_rates_at'");
+      const v = lr.rows[0]?.value;
+      if (v !== null && v !== undefined && String(v) !== "") candidates.push(String(v));
+    }
+    if (candidates.length === 0) return undefined;
+    candidates.sort();
+    const next = jstMdAfter(candidates[0], config.ratesRefreshDays);
+    return (
+      `すべての物件の料金カレンダーが更新周期（${config.ratesRefreshDays}日）以内のため、取得は不要でした（料金は発生していません）。` +
+      (next ? `次に更新対象になるのは ${next} 以降です。` : "") +
+      "周期は「料金カレンダーの更新周期」で変更でき、自社カレンダーだけなら価格最適化の「自社カレンダーを今すぐ取得」（約$0.10）で更新できます"
+    );
+  } catch {
+    return undefined;
+  }
+}
+
 export async function syncStep(
   db: Client,
   syncType: "cron_daily" | "manual_refresh",
@@ -1158,10 +1204,14 @@ export async function syncStep(
     if (workRemains && !capExhausted) {
       return finalize("PARTIAL", staleAreas, ratesRemaining, "残り作業をチェーンで継続します");
     }
-    const message =
+    let message =
       capExhausted && ratesRemaining > 0
         ? `1回の同期の呼び出し上限 (${config.dailyRatesCalls}件) に達しました。残り${ratesRemaining}物件は次回の同期で更新されます`
         : undefined;
+    if (message === undefined && searchCalls === 0 && ratesCalls === 0) {
+      // 何も取得しなかった理由 (更新周期内) と、次に更新対象になる日を伝える (押しても 0件で理由が分からないため)
+      message = await nothingDueMessage(db, config, subsetClause, subsetArgs);
+    }
     return finalize("SUCCESS", staleAreas, ratesRemaining, message);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

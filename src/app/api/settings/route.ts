@@ -4,6 +4,7 @@ import {
   getSyncConfig,
   refreshLuminaRates,
   refreshLuminaSpecs,
+  getLuminaSpecLastFetch,
   saveSyncConfig,
   COST_PER_RATES_CALL,
   COST_PER_SEARCH_CALL,
@@ -84,6 +85,7 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({
     configured: true,
     config,
+    luminaSpecsLastFetch: await getLuminaSpecLastFetch(db),
     trackedProperties,
     costEstimate,
     estimatedMonthlyCostUsd: costEstimate.autoSync ? costEstimate.monthlyIfAutoUsd : 0,
@@ -132,6 +134,7 @@ export async function POST(request: NextRequest) {
         notFound: result.notFound ?? false,
         fetched: result.fetched,
         config: newConfig,
+        luminaSpecsLastFetch: await getLuminaSpecLastFetch(db),
         trackedProperties,
         costEstimate,
         estimatedMonthlyCostUsd: costEstimate.autoSync ? costEstimate.monthlyIfAutoUsd : 0,

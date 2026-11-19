@@ -499,6 +499,70 @@ export interface LuminaSpecFetch {
   occupancy: number | null; // 0-100
   adr: number | null;
   title: string | null;
+  /** AirROI 側のデータ時点 (応答に収集日の項目があれば YYYY-MM-DD)。無ければ null */
+  dataDate: string | null;
+}
+
+/** 自物件スペックの直近の自動取得結果 (sync_state "lumina_specs_last_fetch" に JSON で保存) */
+export interface LuminaSpecLastFetch {
+  at: string; // 取得日時 (ISO)
+  rating: number | null; // AirROI が返した値
+  reviews: number | null;
+  dataDate: string | null;
+  /** AirROI の値が保存済みの値より古かったため、評価・レビュー数などを上書きしなかった */
+  keptNewer: boolean;
+}
+
+export const LUMINA_SPECS_LAST_FETCH_KEY = "lumina_specs_last_fetch";
+
+const DATA_DATE_KEYS = [
+  "last_scraped",
+  "last_scraped_at",
+  "scraped_at",
+  "scrape_date",
+  "last_updated",
+  "last_updated_at",
+  "updated_at",
+  "last_seen",
+  "last_seen_at",
+  "data_date",
+  "snapshot_date",
+];
+
+function toDateOnly(v: unknown): string | null {
+  if (v === undefined || v === null || v === "") return null;
+  const s = String(v);
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(s);
+  if (m) return m[1];
+  const n = Number(v);
+  if (Number.isFinite(n) && n > 1e9) {
+    const d = new Date(n > 1e12 ? n : n * 1000);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+  }
+  return null;
+}
+
+/** 直近の自動取得結果を読む (無い・壊れていれば null) */
+export async function getLuminaSpecLastFetch(db: Client): Promise<LuminaSpecLastFetch | null> {
+  try {
+    const res = await db.execute({
+      sql: "SELECT value FROM sync_state WHERE key = ?",
+      args: [LUMINA_SPECS_LAST_FETCH_KEY],
+    });
+    const raw = res.rows[0]?.value;
+    if (raw === undefined || raw === null) return null;
+    const v = JSON.parse(String(raw)) as Partial<LuminaSpecLastFetch>;
+    if (typeof v.at !== "string") return null;
+    return {
+      at: v.at,
+      rating: typeof v.rating === "number" ? v.rating : null,
+      reviews: typeof v.reviews === "number" ? v.reviews : null,
+      dataDate: typeof v.dataDate === "string" ? v.dataDate : null,
+      keptNewer: v.keptNewer === true,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -548,13 +612,21 @@ export async function fetchLuminaSpecs(config: SyncConfig): Promise<LuminaSpecFe
     occupancy: occPct(pick(flat, ["l90d_occupancy", "ttm_occupancy"])),
     adr: num(pick(flat, ["l90d_avg_rate", "ttm_avg_rate"])),
     title: titleRaw != null ? String(titleRaw) : null,
+    dataDate: toDateOnly(pick(flat, DATA_DATE_KEYS)),
   };
 }
 
 /**
  * 自物件スペックを AirROI から取得し config に保存する (勝ちパターン分析・収益ラボ用)。
- * 分析用スペック (評価/レビュー/写真/スーパーホスト/設備) は取得値で上書きし、
- * 物理スペック・稼働率 (寝室/定員/稼働率) は未設定のときだけ補完 (手動入力を尊重)。
+ * AirROI は Airbnb を定期的に収集したデータを返すため、実際の Airbnb より古いことがある
+ * (例: Airbnb ★4.93・15件 に対し AirROI ★4.9・10件)。レビュー数は増える一方なので、それで新旧を判定する:
+ * - AirROI のレビュー数 >= 保存済み (または保存済みが無い): AirROI の方が新しいか同じ →
+ *   分析用スペック (評価/レビュー/写真/スーパーホスト/設備) を取得値で上書き。
+ *   ただしレビュー数が同じなら評価は保存済み (手入力の小数2桁など) を優先
+ * - AirROI のレビュー数 < 保存済み、または AirROI にレビュー数が無く保存済みがある: AirROI の方が古い →
+ *   保存済みの値は上書きせず、未設定の項目だけ補完 (手入力した最新の値を古いデータで戻さない)
+ * 物理スペック・稼働率 (寝室/定員/稼働率) は従来どおり未設定のときだけ補完 (手動入力を尊重)。
+ * 取得結果 (AirROI の評価・レビュー数・データ時点・上書きしなかったか) は sync_state に記録する。
  */
 export async function refreshLuminaSpecs(
   db: Client,
@@ -587,11 +659,23 @@ export async function refreshLuminaSpecs(
   }
 
   const patch: Partial<SyncConfig> = {};
-  if (specs.rating !== null) patch.luminaRating = specs.rating;
-  if (specs.reviews !== null) patch.luminaReviews = specs.reviews;
-  if (specs.photos !== null) patch.luminaPhotos = specs.photos;
-  if (specs.superhost !== null) patch.luminaSuperhost = specs.superhost;
-  if (specs.amenities.length > 0) patch.luminaAmenities = specs.amenities;
+  const savedReviews = config.luminaReviews;
+  // AirROI のデータが保存済みより古い (レビュー数が少ない / 不明) なら、保存済みの値は上書きしない
+  const airroiOlder =
+    savedReviews !== null && (specs.reviews === null || specs.reviews < savedReviews);
+  if (!airroiOlder) {
+    if (specs.reviews !== null) patch.luminaReviews = specs.reviews;
+    const sameCount = specs.reviews !== null && savedReviews !== null && specs.reviews === savedReviews;
+    if (specs.rating !== null && !(sameCount && config.luminaRating !== null)) patch.luminaRating = specs.rating;
+    if (specs.photos !== null) patch.luminaPhotos = specs.photos;
+    if (specs.superhost !== null) patch.luminaSuperhost = specs.superhost;
+    if (specs.amenities.length > 0) patch.luminaAmenities = specs.amenities;
+  } else {
+    if (specs.rating !== null && config.luminaRating === null) patch.luminaRating = specs.rating;
+    if (specs.photos !== null && config.luminaPhotos === null) patch.luminaPhotos = specs.photos;
+    if (specs.superhost !== null && config.luminaSuperhost === null) patch.luminaSuperhost = specs.superhost;
+    if (specs.amenities.length > 0 && config.luminaAmenities.length === 0) patch.luminaAmenities = specs.amenities;
+  }
   // 物理スペック・稼働率は手動入力を優先し、未設定 (0/null) のときのみ補完
   if (specs.bedrooms !== null && !config.luminaBedrooms) patch.luminaBedrooms = specs.bedrooms;
   if (specs.maxGuests !== null && !config.luminaMaxGuests) patch.luminaMaxGuests = specs.maxGuests;
@@ -603,6 +687,33 @@ export async function refreshLuminaSpecs(
   }
 
   await saveSyncConfig(db, patch);
+  const lastFetch: LuminaSpecLastFetch = {
+    at: new Date().toISOString(),
+    rating: specs.rating,
+    reviews: specs.reviews,
+    dataDate: specs.dataDate,
+    keptNewer: airroiOlder,
+  };
+  await db
+    .execute({
+      sql: `INSERT INTO sync_state (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+      args: [LUMINA_SPECS_LAST_FETCH_KEY, JSON.stringify(lastFetch)],
+    })
+    .catch((err) => console.error("AirROI: 自物件スペックの取得結果の記録に失敗:", err));
+
+  const asOf = specs.dataDate ? `（AirROIのデータ時点 ${specs.dataDate}）` : "";
+  if (airroiOlder) {
+    const airroiText = `${specs.rating !== null ? `★${specs.rating}` : "評価なし"}・${specs.reviews !== null ? `レビュー${specs.reviews}件` : "レビュー数なし"}`;
+    const savedText = `${config.luminaRating !== null ? `★${config.luminaRating}` : "評価未設定"}・レビュー${savedReviews}件`;
+    return {
+      ok: true,
+      fetched: specs,
+      message:
+        `AirROIのデータ（${airroiText}）${asOf}は保存済みの値（${savedText}）より古いため、上書きしませんでした。` +
+        "AirROIはAirbnbを定期的に収集しており、最新の件数が反映されるまで時間がかかります。最新の値は手入力で保存してください。",
+    };
+  }
 
   const filled: string[] = [];
   if (patch.luminaRating !== undefined) filled.push(`評価 ${specs.rating}★`);
@@ -613,7 +724,8 @@ export async function refreshLuminaSpecs(
   if (patch.luminaAmenities !== undefined) filled.push(`設備 ${specs.amenities.length}件`);
   const message =
     filled.length > 0
-      ? `自物件スペックを自動取得しました → ${filled.join(" / ")}`
+      ? `自物件スペックを自動取得しました${asOf} → ${filled.join(" / ")}。` +
+        "AirROIの値は実際のAirbnbより遅れることがあります。Airbnbの方が新しければ手入力で上書きしてください"
       : "リスティング詳細は取得できましたが、スペック項目を抽出できませんでした。";
   return { ok: true, fetched: specs, message };
 }

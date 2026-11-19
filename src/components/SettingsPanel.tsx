@@ -80,6 +80,14 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
     monthlyIfAutoUsd: number;
   } | null>(null);
   const [form, setForm] = useState<SettingsState | null>(null);
+  // 自物件スペックの直近の自動取得結果 (AirROI が返した値。実際の Airbnb より古いことがある)
+  const [specsLastFetch, setSpecsLastFetch] = useState<{
+    at: string;
+    rating: number | null;
+    reviews: number | null;
+    dataDate: string | null;
+    keptNewer: boolean;
+  } | null>(null);
 
   useEffect(() => {
     if (!open || form) return;
@@ -92,6 +100,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
           return;
         }
         setForm(toFormState(json.config));
+        setSpecsLastFetch(json.luminaSpecsLastFetch ?? null);
         setTracked(json.trackedProperties);
         setMonthlyCost(json.estimatedMonthlyCostUsd);
         setCostEstimate(json.costEstimate ?? null);
@@ -143,6 +152,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
       });
       const json = await res.json();
       if (json.config) setForm(toFormState(json.config));
+      if (json.luminaSpecsLastFetch !== undefined) setSpecsLastFetch(json.luminaSpecsLastFetch);
       setMessageTone(json.saved ? "info" : "error");
       setMessage(json.message ?? json.error ?? (json.saved ? "取得しました" : "取得に失敗しました"));
       if (json.saved) router.refresh();
@@ -428,8 +438,26 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                 </button>
                 <p className="mb-2 text-[11px] text-slate-400">
                   登録済みのリスティングIDを使い、評価・レビュー数・写真枚数・スーパーホスト・保有設備をAirROIから取得して下記に反映します。手入力で上書きも可能です。
+                  AirROIの値はAirbnbを定期的に収集したもので、実際のAirbnbより遅れることがあります。Airbnbの方が新しい場合は手入力して保存してください
+                  （AirROIのレビュー数が保存済みより少ない＝古いデータのときは、手入力した値を上書きしません）。
                   自物件がAirROI未収録の場合は取得できませんが、その際もデータ同期のたびに自動で再取得を試み、収録され次第この欄に反映されます。
                 </p>
+                {specsLastFetch && (
+                  <p
+                    className={`mb-2 rounded-md px-2 py-1.5 text-[11px] leading-relaxed ${
+                      specsLastFetch.keptNewer ? "bg-amber-50 text-amber-900" : "bg-white text-slate-600"
+                    }`}
+                  >
+                    前回の取得:{" "}
+                    {new Date(specsLastFetch.at).toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo", month: "numeric", day: "numeric" })}
+                    {" "}— AirROI上の値 {specsLastFetch.rating !== null ? `★${specsLastFetch.rating}` : "評価なし"}・
+                    {specsLastFetch.reviews !== null ? `レビュー${specsLastFetch.reviews}件` : "レビュー数なし"}
+                    {specsLastFetch.dataDate ? `（データ時点 ${specsLastFetch.dataDate}）` : ""}
+                    {specsLastFetch.keptNewer
+                      ? "。保存済みの値の方が新しいため上書きしていません（再取得しても AirROI 側が更新されるまで同じ値です）"
+                      : ""}
+                  </p>
+                )}
                 <div className="flex flex-col gap-2.5">
                   <div className="flex gap-2">
                     <div className="flex-1">

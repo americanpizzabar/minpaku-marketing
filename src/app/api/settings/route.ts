@@ -85,7 +85,7 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({
     configured: true,
     config,
-    luminaSpecsLastFetch: await getLuminaSpecLastFetch(db),
+    luminaSpecsLastFetch: await getLuminaSpecLastFetch(db, config.luminaListingId),
     trackedProperties,
     costEstimate,
     estimatedMonthlyCostUsd: costEstimate.autoSync ? costEstimate.monthlyIfAutoUsd : 0,
@@ -134,7 +134,7 @@ export async function POST(request: NextRequest) {
         notFound: result.notFound ?? false,
         fetched: result.fetched,
         config: newConfig,
-        luminaSpecsLastFetch: await getLuminaSpecLastFetch(db),
+        luminaSpecsLastFetch: await getLuminaSpecLastFetch(db, newConfig.luminaListingId),
         trackedProperties,
         costEstimate,
         estimatedMonthlyCostUsd: costEstimate.autoSync ? costEstimate.monthlyIfAutoUsd : 0,
@@ -242,11 +242,13 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // リスティングIDが新規登録・変更された場合は自物件スペックも自動取得する
-  // (手動入力を尊重するため refreshLuminaSpecs 側で未設定項目のみ補完)
+  // リスティングIDが新規登録・変更された場合は自物件スペックも自動取得する。
+  // 別のIDに変えたときは、保存済みのスペックは前のリスティングのものなので新旧を判定せず上書きする
+  let specsMessage: string | null = null;
   if (config.luminaListingId && config.luminaListingId !== prevConfig.luminaListingId) {
     try {
-      await refreshLuminaSpecs(db, config);
+      const r = await refreshLuminaSpecs(db, config, { listingChanged: !!prevConfig.luminaListingId });
+      specsMessage = r.message;
       config = await getSyncConfig(db);
     } catch (err) {
       console.error("設定保存後の自物件スペック取得に失敗:", err);
@@ -259,6 +261,8 @@ export async function POST(request: NextRequest) {
   const costEstimate = estimateCosts(trackedProperties, config);
   return NextResponse.json({
     saved: true,
+    specsMessage,
+    luminaSpecsLastFetch: await getLuminaSpecLastFetch(db, config.luminaListingId),
     config,
     trackedProperties,
     costEstimate,

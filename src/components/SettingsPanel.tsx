@@ -86,7 +86,7 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
     rating: number | null;
     reviews: number | null;
     dataDate: string | null;
-    keptNewer: boolean;
+    keptReason: "older" | "unknownCount" | null;
   } | null>(null);
 
   useEffect(() => {
@@ -189,9 +189,12 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
       const json = await res.json();
       if (json.saved) {
         setForm(toFormState(json.config));
+        if (json.luminaSpecsLastFetch !== undefined) setSpecsLastFetch(json.luminaSpecsLastFetch);
         setMonthlyCost(json.estimatedMonthlyCostUsd);
         setCostEstimate(json.costEstimate ?? null);
-        setMessage("設定を保存し、グラフに反映しました");
+        setMessage(
+          json.specsMessage ? `設定を保存し、グラフに反映しました。${json.specsMessage}` : "設定を保存し、グラフに反映しました",
+        );
         // サーバーコンポーネントを再取得してKPI・グラフを即時更新する
         router.refresh();
       } else {
@@ -439,13 +442,13 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                 <p className="mb-2 text-[11px] text-slate-400">
                   登録済みのリスティングIDを使い、評価・レビュー数・写真枚数・スーパーホスト・保有設備をAirROIから取得して下記に反映します。手入力で上書きも可能です。
                   AirROIの値はAirbnbを定期的に収集したもので、実際のAirbnbより遅れることがあります。Airbnbの方が新しい場合は手入力して保存してください
-                  （AirROIのレビュー数が保存済みより少ない＝古いデータのときは、手入力した値を上書きしません）。
+                  （AirROIのレビュー数が保存済みより少ないときは古いデータの可能性があるため、評価・レビュー数を上書きしません）。
                   自物件がAirROI未収録の場合は取得できませんが、その際もデータ同期のたびに自動で再取得を試み、収録され次第この欄に反映されます。
                 </p>
                 {specsLastFetch && (
                   <p
                     className={`mb-2 rounded-md px-2 py-1.5 text-[11px] leading-relaxed ${
-                      specsLastFetch.keptNewer ? "bg-amber-50 text-amber-900" : "bg-white text-slate-600"
+                      specsLastFetch.keptReason ? "bg-amber-50 text-amber-900" : "bg-white text-slate-600"
                     }`}
                   >
                     前回の取得:{" "}
@@ -453,9 +456,11 @@ export default function SettingsPanel({ defaultOpen = false }: { defaultOpen?: b
                     {" "}— AirROI上の値 {specsLastFetch.rating !== null ? `★${specsLastFetch.rating}` : "評価なし"}・
                     {specsLastFetch.reviews !== null ? `レビュー${specsLastFetch.reviews}件` : "レビュー数なし"}
                     {specsLastFetch.dataDate ? `（データ時点 ${specsLastFetch.dataDate}）` : ""}
-                    {specsLastFetch.keptNewer
-                      ? "。保存済みの値の方が新しいため上書きしていません（再取得しても AirROI 側が更新されるまで同じ値です）"
-                      : ""}
+                    {specsLastFetch.keptReason === "older"
+                      ? "。保存済みの値の方が新しい可能性があるため、評価・レビュー数は上書きしていません（AirROI側が更新されるまで、再取得しても同じ値です）"
+                      : specsLastFetch.keptReason === "unknownCount"
+                        ? "。AirROIにレビュー数が無く新旧を判断できないため、評価・レビュー数は上書きしていません"
+                        : ""}
                   </p>
                 )}
                 <div className="flex flex-col gap-2.5">

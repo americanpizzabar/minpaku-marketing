@@ -17,7 +17,7 @@ export default async function SettingsPage() {
       <Suspense>
         <Sidebar dataSource={ds.dataSource} />
       </Suspense>
-      <main className="flex-1 space-y-4 p-4 lg:p-6">
+      <main className="min-w-0 flex-1 space-y-4 p-4 lg:p-6">
         <div>
           <h2 className="text-xl font-bold tracking-tight text-slate-900">設定</h2>
           <p className="text-xs text-slate-500">

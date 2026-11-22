@@ -22,7 +22,7 @@ export default async function DashboardPage({
       <Suspense>
         <Sidebar dataSource={data.dataSource} />
       </Suspense>
-      <main className="flex-1 space-y-4 p-4 lg:p-6">
+      <main className="min-w-0 flex-1 space-y-4 p-4 lg:p-6">
         <div className="flex flex-wrap items-end justify-between gap-2">
           <div>
             <h2 className="text-xl font-bold tracking-tight text-slate-900">
